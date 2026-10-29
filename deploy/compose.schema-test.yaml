@@ -1,0 +1,35 @@
+name: bruteapply-schema-test
+
+# Disposable test database: no host ports, internal-only network, volatile data.
+services:
+  db:
+    image: postgres:17.11-trixie@sha256:31ba9c94a03ada9988f2bb493a22a75eef3a185884533e5cdbcd498ea835b08f
+    environment:
+      POSTGRES_DB: bruteapply_test
+      POSTGRES_USER: postgres
+      POSTGRES_HOST_AUTH_METHOD: trust
+    tmpfs:
+      - /var/lib/postgresql/data:rw,size=1g
+    networks: [test]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U postgres -d bruteapply_test]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+  migration:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    command: [python, scripts/migrate.py]
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgresql://postgres@db:5432/bruteapply_test
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [test]
+    profiles: [migration]
+
+networks:
+  test:
+    internal: true

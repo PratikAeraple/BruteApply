@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bruteapply-api"
+version = "0.1.0"
+description = "Private, policy-gated job-search operations API"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi==0.156.8",
+  "uvicorn[standard]==0.38.0",
+  "psycopg[binary,pool]==3.2.13",
+  "celery[redis]==5.6.2",
+  "PyJWT[crypto]==2.10.1",
+  "cryptography==46.0.3",
+  "python-multipart==0.0.20",
+  "httpx==0.28.1",
+]
+
+[project.optional-dependencies]
+test = ["pytest==8.4.2", "httpx==0.28.1"]
+ai = ["openai==2.6.1"]
+google = ["google-api-python-client==2.187.0", "google-auth-oauthlib==1.2.2"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+exclude = ["tests*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

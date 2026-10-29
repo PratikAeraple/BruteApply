@@ -1,0 +1,41 @@
+name: BruteApply CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and run isolated backend tests
+        run: |
+          docker build -f backend/Dockerfile.test -t bruteapply-test .
+          docker run --rm --network none bruteapply-test
+      - name: Scan public source for secrets and private data
+        run: python3 scripts/secret_scan.py .
+      - name: Validate demo Compose model
+        run: docker compose -f deploy/compose.demo.yaml config --quiet
+
+  frontend:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm audit --omit=dev

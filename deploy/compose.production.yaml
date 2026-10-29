@@ -1,0 +1,192 @@
+name: bruteapply
+
+# Prepared private production topology. Requires protected secrets and verified
+# exact-host Cloudflare Access before attaching web to the existing ingress.
+services:
+  db:
+    image: postgres:17.11-trixie@sha256:31ba9c94a03ada9988f2bb493a22a75eef3a185884533e5cdbcd498ea835b08f
+    environment:
+      POSTGRES_DB: bruteapply
+      POSTGRES_USER: bruteapply
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+    secrets: [postgres_password]
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    networks: [data]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+      - /var/run/postgresql:rw,noexec,nosuid,size=8m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    mem_limit: 1536m
+    cpus: 1.5
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U bruteapply -d bruteapply]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  redis:
+    image: redis:8.4.8-trixie@sha256:8966e8ff525ef9e3f3ea476cb15db868a41a701f5188c77c138e3ce613c2d81a
+    command: [redis-server, --appendonly, "yes", --save, "60", "1000", --appendfsync, everysec, --maxmemory, 256mb, --maxmemory-policy, noeviction]
+    volumes: [redis_data:/data]
+    networks: [data]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    mem_limit: 384m
+    cpus: 0.75
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 20s
+      timeout: 4s
+      retries: 3
+
+  migrate:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    command: [python, scripts/migrate.py]
+    environment:
+      APP_ENV: production
+      DATABASE_URL_FILE: /run/secrets/database_url
+    secrets: [database_url]
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [data]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+    mem_limit: 256m
+    cpus: 0.5
+
+  api:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    environment: &application_environment
+      APP_ENV: production
+      DEMO_MODE: "false"
+      OWNER_EMAIL: ${BRUTEAPPLY_OWNER_EMAIL:?set exact Access owner email}
+      CF_ACCESS_ISSUER: ${BRUTEAPPLY_ACCESS_ISSUER:?set exact Access issuer}
+      CF_ACCESS_AUD: ${BRUTEAPPLY_ACCESS_AUDIENCE:?set exact Access audience}
+      DATABASE_URL_FILE: /run/secrets/database_url
+      DOCUMENT_ENCRYPTION_KEY_FILE: /run/secrets/document_encryption_key
+      DOCUMENT_ROOT: /var/lib/bruteapply/documents
+      REDIS_URL: redis://redis:6379/0
+      TIMEZONE: America/Toronto
+      AUTONOMOUS_SUBMISSION_ENABLED: "false"
+    secrets: [database_url, document_encryption_key]
+    volumes: [documents:/var/lib/bruteapply/documents]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks: [application, data]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    init: true
+    restart: unless-stopped
+    mem_limit: 768m
+    cpus: 1.0
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  worker:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    command: [celery, -A, app.tasks.celery_app, worker, --loglevel=INFO, --concurrency=2]
+    environment:
+      <<: *application_environment
+    secrets: [database_url, document_encryption_key]
+    volumes: [documents:/var/lib/bruteapply/documents]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks: [data, egress]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    init: true
+    restart: unless-stopped
+    mem_limit: 768m
+    cpus: 1.0
+
+  web:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    environment:
+      API_INTERNAL_URL: http://api:8000
+      NEXT_TELEMETRY_DISABLED: "1"
+    networks:
+      application: {}
+      tunnel_ingress:
+        aliases: [bruteapply-web]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+      - /app/.next/cache:rw,noexec,nosuid,size=64m,uid=10001,gid=10001
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    init: true
+    restart: unless-stopped
+    mem_limit: 768m
+    cpus: 1.0
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+networks:
+  application:
+    internal: true
+  data:
+    internal: true
+  egress: {}
+  tunnel_ingress:
+    external: true
+    name: brutehost-platform_tunnel_ingress
+
+volumes:
+  postgres_data:
+    name: bruteapply-postgres-data
+  redis_data:
+    name: bruteapply-redis-data
+  documents:
+    name: bruteapply-private-documents
+
+secrets:
+  postgres_password:
+    file: ${BRUTEAPPLY_SECRET_DIR:?set protected secret directory}/postgres-password
+  database_url:
+    file: ${BRUTEAPPLY_SECRET_DIR:?set protected secret directory}/database-url
+  document_encryption_key:
+    file: ${BRUTEAPPLY_SECRET_DIR:?set protected secret directory}/document-encryption-key

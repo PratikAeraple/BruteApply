@@ -1,0 +1,14 @@
+FROM python:3.12.16-slim-trixie@sha256:8523d6abeb48ceae0b7240d30c5808fc26cb79c1a635bacdf19cf3baecfbec07
+WORKDIR /repo
+COPY .gitignore ./.gitignore
+COPY .env.example ./.env.example
+COPY backend/requirements-test.lock ./requirements-test.lock
+RUN pip install --no-cache-dir --require-hashes -r requirements-test.lock
+COPY backend/app ./backend/app
+COPY backend/tests ./backend/tests
+COPY backend/migrations ./backend/migrations
+COPY backend/scripts ./backend/scripts
+COPY scripts ./scripts
+ENV PYTHONPATH=/repo/backend:/repo PYTHONDONTWRITEBYTECODE=1
+USER 10001:10001
+CMD ["pytest", "-q"]
