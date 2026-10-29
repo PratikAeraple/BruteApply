@@ -40,5 +40,12 @@ def test_migration_schema_rate_limit_and_encrypted_profile_against_disposable_po
         after=asyncio.run(main.get_profile(actor))
         assert after["facts"]=={"full_name":"Reviewed Candidate"}
         assert after["verified_count"]==1 and after["pending_count"]==0
+        with pytest.raises(HTTPException) as unimplemented:
+            asyncio.run(main.control_agent({"agent":"discovery","action":"START"},actor))
+        assert unimplemented.value.status_code==409
+        asyncio.run(main.emergency_stop(actor))
+        with psycopg.connect(url) as conn:
+            stopped=conn.execute("SELECT emergency_stopped FROM agent_configuration WHERE agent='submission'").fetchone()[0]
+        assert stopped is True
     finally:
         db.close_pool()

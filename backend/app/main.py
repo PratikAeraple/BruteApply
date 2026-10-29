@@ -44,6 +44,7 @@ DEMO_TICKETS = [
     {"id":"BA-DEMO-1042","category":"SENSITIVE_QUESTION","priority":"HIGH","status":"OPEN","summary":"Employer asks for a sensitive declaration","required_action":"Review the question and provide an approved answer or skip."},
     {"id":"BA-DEMO-1041","category":"MANUAL_SUBMISSION_REQUIRED","priority":"NORMAL","status":"OPEN","summary":"Application provider requires an interactive account step","required_action":"Open the employer site and complete it manually if desired."},
 ]
+RUNNABLE_WORKERS: set[str] = set()
 
 
 @asynccontextmanager
@@ -109,7 +110,8 @@ async def overview(_: Principal = Depends(_owner)):
               "workers":{}}
     result["counts"].update({r["lifecycle"].casefold():r["count"] for r in job_counts})
     result["counts"].update({r["state"].casefold():r["count"] for r in app_counts})
-    result["workers"]={r["agent"]:("EMERGENCY STOP" if r["emergency_stopped"] else "PAUSED" if r["paused"]
+    result["workers"]={r["agent"]:("EMERGENCY STOP" if r["emergency_stopped"] else "NOT CONFIGURED"
+                                  if r["agent"] not in RUNNABLE_WORKERS else "PAUSED" if r["paused"]
                                   else "ENABLED" if r["enabled"] else "STOPPED") for r in agent_rows}
     try:
         import redis
@@ -529,6 +531,8 @@ async def control_agent(payload: dict, principal: Principal = Depends(_owner)):
         raise HTTPException(422, "invalid agent control command")
     if agent == "submission" and action == "START" and not config.AUTONOMOUS_SUBMISSION_ENABLED:
         raise HTTPException(409, "submission remains disabled pending owner activation gate")
+    if action == "START" and agent not in RUNNABLE_WORKERS:
+        raise HTTPException(409, "no runnable handler is configured for this worker")
     if config.DEMO_MODE:
         return {"mode":"DEMO","changed":False,"reason":"demo controls never start workers"}
     if action == "EMERGENCY_STOP":
