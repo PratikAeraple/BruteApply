@@ -19,7 +19,7 @@ class EmailCategory(StrEnum):
 
 PATTERNS = {
     EmailCategory.APPLICATION_CONFIRMATION: re.compile(r"application (?:was )?(?:received|submitted)|thank you for applying|submission confirmation",re.I),
-    EmailCategory.INTERVIEW_INVITATION: re.compile(r"(?:invite|invitation|schedule|availability).{0,50}interview|interview.{0,50}(?:invite|schedule|availability)",re.I),
+    EmailCategory.INTERVIEW_INVITATION: re.compile(r"(?:invite|invitation|schedule|availability).{0,50}interview|interview.{0,50}(?:invite|invitation|schedule|availability)",re.I),
     EmailCategory.ASSESSMENT: re.compile(r"assessment|technical test|coding test|skills test",re.I),
     EmailCategory.REJECTION: re.compile(r"(?:not|unsuccessful|unable to) (?:moving forward|selected)|position.{0,30}filled|application.{0,30}declined",re.I),
     EmailCategory.OFFER: re.compile(r"(?:job|employment|written) offer|offer of employment",re.I),
