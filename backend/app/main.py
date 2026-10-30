@@ -125,6 +125,9 @@ async def overview(_: Principal = Depends(_owner)):
               "dead_letters":dead_letters}
     result["counts"].update({r["lifecycle"].casefold():r["count"] for r in job_counts})
     result["counts"].update({r["state"].casefold():r["count"] for r in app_counts})
+    # The overview card means total jobs found, not only jobs still in the
+    # DISCOVERED lifecycle after qualification/matching.
+    result["counts"]["discovered"]=jobs
     result["workers"]={r["agent"]:("EMERGENCY STOP" if r["emergency_stopped"] else "NOT CONFIGURED"
                                   if r["agent"] not in RUNNABLE_WORKERS else "PAUSED" if r["paused"]
                                   else "ENABLED" if r["enabled"] else "STOPPED") for r in agent_rows}
