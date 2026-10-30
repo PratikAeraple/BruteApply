@@ -107,9 +107,22 @@ async def overview(_: Principal = Depends(_owner)):
         tickets = conn.execute("SELECT count(*)::int FROM ticket WHERE state IN ('OPEN','IN_PROGRESS')").fetchone()[0]
         jobs = conn.execute("SELECT count(*)::int FROM job").fetchone()[0]
         agent_rows=conn.execute("SELECT agent,enabled,paused,drain,emergency_stopped FROM agent_configuration").fetchall()
+        latest_discovery=conn.execute("""SELECT state,started_at,completed_at,payload FROM worker_job
+          WHERE task_name='public_ats_discovery' ORDER BY completed_at DESC NULLS LAST,started_at DESC LIMIT 1""").fetchone()
+        successful_discovery=conn.execute("""SELECT completed_at FROM worker_job
+          WHERE task_name='public_ats_discovery' AND state='SUCCEEDED'
+          ORDER BY completed_at DESC LIMIT 1""").fetchone()
+        dead_letters=conn.execute("SELECT count(*)::int FROM worker_job WHERE state='DEAD_LETTER'").fetchone()[0]
+        qualified=conn.execute("SELECT count(*)::int FROM job WHERE lifecycle IN ('QUALIFIED','SHORTLISTED','PREPARED')").fetchone()[0]
     result = {"mode":"PRODUCTION", "counts":{"discovered":jobs,"tickets":tickets},
               "components":{"database":"UP","queue":"UNKNOWN","worker":"UNKNOWN"},
-              "workers":{}}
+              "workers":{},"discovery":{"last_run_state":latest_discovery["state"] if latest_discovery else "NOT RUN",
+                "last_run_at":latest_discovery["completed_at"] if latest_discovery else None,
+                "last_success_at":successful_discovery["completed_at"] if successful_discovery else None,
+                "last_run_inserted":(latest_discovery["payload"] or {}).get("jobs_inserted") if latest_discovery else None,
+                "last_run_duplicates":(latest_discovery["payload"] or {}).get("duplicates") if latest_discovery else None,
+                "total_jobs":jobs,"qualified_jobs":qualified},
+              "dead_letters":dead_letters}
     result["counts"].update({r["lifecycle"].casefold():r["count"] for r in job_counts})
     result["counts"].update({r["state"].casefold():r["count"] for r in app_counts})
     result["workers"]={r["agent"]:("EMERGENCY STOP" if r["emergency_stopped"] else "NOT CONFIGURED"
@@ -118,10 +131,21 @@ async def overview(_: Principal = Depends(_owner)):
     try:
         import redis
         client=redis.Redis.from_url(config.REDIS_URL,socket_connect_timeout=1,socket_timeout=1)
-        client.ping(); client.close()
+        client.ping()
+        result["queue_depth"]=client.llen("celery")
+        client.close()
         result["components"]["queue"]="UP"
     except Exception:
         result["components"]["queue"]="DOWN"
+        result["queue_depth"]=None
+    try:
+        from .tasks import celery_app
+        workers=celery_app.control.inspect(timeout=1.0).ping() or {}
+        result["components"]["worker"]="UP" if workers else "DOWN"
+        result["worker_count"]=len(workers)
+    except Exception:
+        result["components"]["worker"]="UNKNOWN"
+        result["worker_count"]=None
     result["backup"] = {"status":"DEFERRED / NOT IMPLEMENTED", "restore_test":"NOT TESTED"}
     result["integrations"] = {"google_sheets":"NOT CONFIGURED", "email":"NOT CONFIGURED", "ai":"NOT CONFIGURED"}
     return result

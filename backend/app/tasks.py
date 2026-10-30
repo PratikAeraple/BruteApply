@@ -73,10 +73,11 @@ def _claim_task(conn, key: str, name: str) -> bool:
     return row is not None
 
 
-def _finish_task(conn, key: str, state: str = "SUCCEEDED", error: str | None = None) -> None:
+def _finish_task(conn, key: str, state: str = "SUCCEEDED", error: str | None = None,
+                 payload: dict | None = None) -> None:
     conn.execute("""UPDATE worker_job SET state=CASE WHEN %s='FAILED' AND attempts>=5 THEN 'DEAD_LETTER' ELSE %s END,
-      completed_at=now(),error_category=%s
-      WHERE idempotency_key=%s""", (state, state, error, key))
+      completed_at=now(),error_category=%s,payload=%s
+      WHERE idempotency_key=%s""", (state, state, error, Jsonb(payload or {}), key))
 
 
 def _insert_job(conn, source_id, board_name: str, raw: dict) -> tuple[bool, object | None]:
@@ -213,7 +214,7 @@ def discover_enabled_sources(self):
                 raise ValueError("source configuration is incomplete")
             provider=PublicATSProvider(PublicBoard(board_name,host,slug,cfg.get("company_name")))
             raw_items=asyncio.run(provider.discover())
-            created=0
+            created=0;duplicates=0
             with db.connection() as conn:
                 with conn.transaction():
                     # Check source still enabled after network access. Revocation
@@ -226,13 +227,14 @@ def discover_enabled_sources(self):
                         try:
                             added,job_id=_insert_job(conn,source["id"],source["name"],raw)
                             created += int(added)
+                            duplicates += int(not added and job_id is not None)
                             if added and job_id:
                                 _score_new_job(conn,job_id)
                         except ValueError:
                             # Invalid individual posting is isolated; the worker
                             # never follows its URL or executes its content.
                             continue
-                    _finish_task(conn,identity)
+                    _finish_task(conn,identity,payload={"jobs_inserted":created,"duplicates":duplicates})
             results.append({"source":source["name"],"state":"SUCCEEDED","jobs":created})
         except Exception as exc:
             # Error text may contain external content; store only a category.
