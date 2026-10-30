@@ -15,7 +15,23 @@ export function proxy(request: NextRequest) {
     }
     destination.pathname = request.nextUrl.pathname;
     destination.search = request.nextUrl.search;
-    return NextResponse.rewrite(destination);
+    // Cloudflare Access adds this signed assertion at the edge. The API
+    // validates its signature, issuer, audience and owner identity itself.
+    // Next's rewrite must explicitly forward the incoming request headers;
+    // otherwise the private API correctly returns 401 for every dashboard
+    // request even though the browser passed Access.
+    const apiHeaders = new Headers();
+    for (const name of [
+      "accept",
+      "content-type",
+      "origin",
+      "cf-access-jwt-assertion",
+      "x-requested-with",
+    ]) {
+      const value = request.headers.get(name);
+      if (value !== null) apiHeaders.set(name, value);
+    }
+    return NextResponse.rewrite(destination, { request: { headers: apiHeaders } });
   }
 
   const nonce = Buffer.from(crypto.randomUUID()).toString("base64");
