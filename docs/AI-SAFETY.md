@@ -1,7 +1,9 @@
-# AI safety
+# AI safety and provider state
 
-AI is optional and has no production credential configured. A provider abstraction may extract structured fields, explain job matches or draft documents, but its output is untrusted and cannot authorize an application or override a deterministic blocker.
+The provider boundary has a deterministic fake for tests and an optional OpenAI Responses API transport using strict JSON Schema output, `store:false`, no tools, bounded request sizes, timeouts, redacted provider errors, and a protected key file. AI is **NOT_CONFIGURED** in production; no Codex login or credential is used.
 
-Job descriptions, company websites, ATS fields, uploaded content and recruiter email are untrusted. They may include prompt-injection instructions. Pass them as bounded data, never as system/developer policy. Do not include credentials, unrelated applications, database contents, or hidden prompts in a model context. Validate every structured response, track usage against daily/monthly limits, and degrade to deterministic matching/manual tickets when the provider is unavailable.
+The current token budget guard is process-local and suitable only for isolated/test calls. It is not a durable multi-worker billing ledger and does not calculate model cost. Before enabling a paid production model, implement database-backed reservation/settlement, explicit daily/monthly limits and model cost accounting, then provision an owner-controlled API credential. Do not enable AI tasks or use AI as policy authority until that gate is complete.
+
+Job descriptions, company websites, ATS fields, uploaded documents and recruiter email are untrusted. Pass them as bounded data, never as system/developer policy. Do not include credentials, unrelated applications, database contents or hidden prompts in model context. Deterministic eligibility and submission rules remain authoritative. When AI is unavailable, matching falls back to deterministic evidence and uncertain tasks become owner tickets.
 
 The public demo does not connect to OpenAI or any external model service.

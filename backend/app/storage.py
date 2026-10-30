@@ -82,3 +82,21 @@ def store_private(data: bytes, display_name: str, root: Path, key: bytes) -> tup
         stream.flush()
         os.fsync(stream.fileno())
     return doc_id, rel, hashlib.sha256(data).hexdigest()
+
+
+def store_private_blob(data: bytes, suffix: str, root: Path, key: bytes) -> tuple[uuid.UUID, str, str]:
+    """Persist generated non-PDF text with randomized path and authenticated encryption."""
+    if not data or len(data)>MAX_UPLOAD_BYTES or suffix not in {"txt","md"}:
+        raise ValueError("private document payload is outside the supported bounds")
+    identity=uuid.uuid4()
+    if root.is_symlink():
+        raise RuntimeError("document storage root may not be a symlink")
+    root.mkdir(mode=0o700,parents=True,exist_ok=True);os.chmod(root,0o700)
+    rel=f"{identity.hex[:2]}/{identity.hex}.{suffix}.enc"
+    dest=root/rel
+    dest.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
+    encrypted=encrypt_document(data,key,identity)
+    fd=os.open(dest,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,"wb") as stream:
+        stream.write(encrypted);stream.flush();os.fsync(stream.fileno())
+    return identity,rel,hashlib.sha256(data).hexdigest()

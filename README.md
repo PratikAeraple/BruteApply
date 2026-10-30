@@ -12,10 +12,10 @@ Job-search work is spread across postings, resumes, applications, follow-ups, re
 
 - FastAPI service with Cloudflare Access JWT validation required outside demo mode.
 - PostgreSQL schema/migrations for profiles, verified facts, jobs, matches, applications, documents, tickets, integrations, workers and audit events.
-- Redis-backed Celery task boundary with bounded retries and late acknowledgements. Provider task bodies deliberately fail closed until terms-reviewed adapters are implemented; no discovery, sync, document generation or submission worker is active.
+- Redis-backed Celery worker and daily scheduler with bounded retries and late acknowledgements. Greenhouse/Lever public-board discovery is implemented but remains inactive until a board is explicitly configured and terms-reviewed. OAuth-dependent sync, email/calendar, AI production use and real submission remain gated.
 - Deterministic job normalization, fingerprinting, hard-blocker checks and explainable scoring.
 - Safe submission-policy gate: unknown facts, sensitive declarations, access controls, CAPTCHA/MFA, duplicate history or unsupported automation stop the flow and create a ticket.
-- Synthetic-data dashboard for local exploration. Demo mode cannot contact the production database, Google, email, OpenAI or job providers.
+- Synthetic-data dashboard for local exploration. Demo mode cannot contact the production database, Google, email, OpenAI or job providers. Production-mode private document generation uses only verbatim provenance-checked facts.
 - The canonical resume source is preserved outside this repository. A verified encrypted local copy exists in owner-only state; it has not been imported into a production database. No personal profile, real application, document or credential is included here.
 
 ## Architecture

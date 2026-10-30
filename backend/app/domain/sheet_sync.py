@@ -16,8 +16,8 @@ FORMULA_COLUMNS = {0, 27, 28}
 
 # Values are indexed by the existing header. Formula-derived Application ID and
 # date calculations remain sheet-owned; no write payload may include them.
-SYSTEM_OWNED = {1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17}
-OWNER_OWNED = {18, 19, 20, 22, 24, 25, 29, 30, 31}
+SYSTEM_OWNED = {1, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17}
+OWNER_OWNED = {6, 18, 19, 20, 22, 24, 25, 29, 30, 31}
 MERGEABLE = {2, 16, 21, 23, 26}
 
 

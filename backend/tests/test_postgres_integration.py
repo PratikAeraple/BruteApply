@@ -15,7 +15,7 @@ def test_migration_schema_rate_limit_and_encrypted_profile_against_disposable_po
     url=os.environ["BRUTEAPPLY_TEST_DATABASE_URL"]
     with psycopg.connect(url) as conn:
         tables={row[0] for row in conn.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public'")}
-    expected={"candidate_profile","profile_fact","job","application","ticket","document","audit_event","agent_configuration","api_rate_limit"}
+    expected={"candidate_profile","profile_fact","candidate_fact","job","application","ticket","document","audit_event","agent_configuration","api_rate_limit","worker_job","job_snapshot"}
     assert expected <= tables
     subject="disposable-test-subject"
     actor=Principal("owner@example.invalid",subject)
@@ -40,9 +40,8 @@ def test_migration_schema_rate_limit_and_encrypted_profile_against_disposable_po
         after=asyncio.run(main.get_profile(actor))
         assert after["facts"]=={"full_name":"Reviewed Candidate"}
         assert after["verified_count"]==1 and after["pending_count"]==0
-        with pytest.raises(HTTPException) as unimplemented:
-            asyncio.run(main.control_agent({"agent":"discovery","action":"START"},actor))
-        assert unimplemented.value.status_code==409
+        started=asyncio.run(main.control_agent({"agent":"discovery","action":"START"},actor))
+        assert started["enabled"] is True and started["paused"] is False
         asyncio.run(main.emergency_stop(actor))
         with psycopg.connect(url) as conn:
             stopped=conn.execute("SELECT emergency_stopped FROM agent_configuration WHERE agent='submission'").fetchone()[0]

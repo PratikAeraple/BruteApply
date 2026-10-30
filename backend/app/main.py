@@ -21,6 +21,7 @@ from .domain.jobs import normalize_job
 from .domain.policy import ApplicationState, SubmissionContext, submission_decision, transition
 from .domain.tickets import transition_ticket
 from .domain.profile import merge_profile_facts, validate_profile_facts
+from .domain.fact_review import FactStatus, ResumeFact, can_bulk_transition, validate_resume_fact
 from .storage import MAX_UPLOAD_BYTES, load_key_file, safe_display_name, store_private, validate_pdf
 from .rate_limit import enforce_owner_limit
 
@@ -44,7 +45,7 @@ DEMO_TICKETS = [
     {"id":"BA-DEMO-1042","category":"SENSITIVE_QUESTION","priority":"HIGH","status":"OPEN","summary":"Employer asks for a sensitive declaration","required_action":"Review the question and provide an approved answer or skip."},
     {"id":"BA-DEMO-1041","category":"MANUAL_SUBMISSION_REQUIRED","priority":"NORMAL","status":"OPEN","summary":"Application provider requires an interactive account step","required_action":"Open the employer site and complete it manually if desired."},
 ]
-RUNNABLE_WORKERS: set[str] = set()
+RUNNABLE_WORKERS: set[str] = {"discovery"}
 
 
 @asynccontextmanager
@@ -173,6 +174,39 @@ async def applications(_: Principal = Depends(_owner)):
     return {"items":rows}
 
 
+@app.get("/api/v1/analytics")
+async def analytics(_: Principal = Depends(_owner)):
+    if config.DEMO_MODE:
+        return {"mode":"DEMO","available":False,"reason":"no production history in demo mode"}
+    with db.connection() as conn:
+        jobs=conn.execute("""SELECT date_trunc('week',discovered_at)::date AS week,count(*)::int AS count
+          FROM job WHERE discovered_at>=now()-interval '12 weeks' GROUP BY 1 ORDER BY 1""").fetchall()
+        funnel=conn.execute("""SELECT 'DISCOVERED' AS stage,count(*)::int AS count FROM job
+          UNION ALL SELECT 'QUALIFIED',count(*)::int FROM job WHERE lifecycle IN ('QUALIFIED','SHORTLISTED','PREPARED')
+          UNION ALL SELECT 'SHORTLISTED',count(*)::int FROM application
+          UNION ALL SELECT 'PREPARED',count(*)::int FROM application WHERE state IN ('PREPARED','READY','SUBMISSION_PENDING','ATTEMPTED','SUBMISSION_ATTEMPTED','SUBMITTED','SUBMISSION_UNVERIFIED')
+          UNION ALL SELECT 'SUBMITTED',count(*)::int FROM application WHERE state IN ('SUBMITTED','ASSESSMENT','RECRUITER_SCREEN','INTERVIEW_1','INTERVIEW_2','FINAL_INTERVIEW','OFFER')""").fetchall()
+        score=conn.execute("""SELECT CASE WHEN score<40 THEN '0-39' WHEN score<60 THEN '40-59'
+          WHEN score<80 THEN '60-79' ELSE '80-100' END AS band,count(*)::int AS count
+          FROM job_match GROUP BY 1 ORDER BY 1""").fetchall()
+        sources=conn.execute("""SELECT s.name AS source,count(DISTINCT j.id)::int AS discovered,
+          count(DISTINCT a.id)::int AS applications,count(DISTINCT a.id) FILTER (WHERE a.state IN
+          ('SUBMITTED','ASSESSMENT','RECRUITER_SCREEN','INTERVIEW_1','INTERVIEW_2','FINAL_INTERVIEW','OFFER'))::int AS submitted
+          FROM job_source s LEFT JOIN job j ON j.source_id=s.id LEFT JOIN application a ON a.job_id=j.id
+          GROUP BY s.name ORDER BY discovered DESC LIMIT 20""").fetchall()
+        categories=conn.execute("""SELECT COALESCE(j.requirements->>'category','Uncategorized') AS category,
+          count(DISTINCT j.id)::int AS jobs,count(DISTINCT a.id)::int AS applications
+          FROM job j LEFT JOIN application a ON a.job_id=j.id GROUP BY 1 ORDER BY jobs DESC LIMIT 20""").fetchall()
+        provinces=conn.execute("""SELECT COALESCE(j.province,'Unspecified') AS province,count(DISTINCT a.id)::int AS applications
+          FROM job j JOIN application a ON a.job_id=j.id GROUP BY 1 ORDER BY applications DESC""").fetchall()
+        events=conn.execute("SELECT state,count(*)::int AS count FROM application GROUP BY state").fetchall()
+    total_apps=sum(row["count"] for row in events)
+    return {"mode":"PRODUCTION","available":True,"sample_size":total_apps,
+      "small_sample":total_apps<5,"jobs_by_week":jobs,"funnel":funnel,"score_distribution":score,
+      "source_performance":sources,"category_performance":categories,"province_performance":provinces,
+      "application_states":events}
+
+
 class ApplicationCreate(BaseModel):
     job_id: UUID
 
@@ -252,6 +286,7 @@ class TicketUpdate(BaseModel):
     state: str = Field(pattern="^(OPEN|IN_PROGRESS|RESOLVED|CANCELLED)$")
     decision: Literal["APPROVE", "DENY", "PROVIDE_INFORMATION", "EDIT", "RETRY", "SKIP", "RESOLVE"] | None = None
     resolution: str | None = Field(default=None, max_length=2000)
+    details: str | None = Field(default=None, max_length=5000)
 
 
 @app.post("/api/v1/tickets", status_code=201)
@@ -286,24 +321,37 @@ async def update_ticket(ticket_id: UUID, payload: TicketUpdate, principal: Princ
     enforce_owner_limit(principal,"ticket-update",60,3600)
     with db.connection() as conn:
         with conn.transaction():
-            current = conn.execute("SELECT state FROM ticket WHERE id=%s FOR UPDATE",(ticket_id,)).fetchone()
+            current = conn.execute("SELECT state,decision FROM ticket WHERE id=%s FOR UPDATE",(ticket_id,)).fetchone()
             if not current:
                 raise HTTPException(404,"ticket not found")
+            if current["decision"] in {"DENY","SKIP"} and payload.state in {"OPEN","IN_PROGRESS"}:
+                raise HTTPException(409,"a denied or skipped workflow cannot be resumed")
+            if payload.decision == "RETRY":
+                raise HTTPException(409,"no retryable workflow handler is registered for this ticket")
+            requested=payload.state
+            if payload.decision in {"APPROVE","PROVIDE_INFORMATION","EDIT"}: requested="IN_PROGRESS"
+            elif payload.decision in {"DENY","SKIP"}: requested="CANCELLED"
+            elif payload.decision == "RESOLVE": requested="RESOLVED"
             try:
-                target = transition_ticket(current["state"],payload.state,decision=payload.decision)
+                target = transition_ticket(current["state"],requested,decision=payload.decision)
             except ValueError as exc:
                 raise HTTPException(409,str(exc)) from None
             if target == "RESOLVED" and not payload.resolution:
                 raise HTTPException(422,"resolution text is required")
+            if payload.decision in {"DENY","SKIP"} and not payload.resolution:
+                raise HTTPException(422,"a denial/skip reason is required")
+            if payload.decision in {"PROVIDE_INFORMATION","EDIT"} and not payload.details:
+                raise HTTPException(422,"updated information is required")
             from .storage import encrypt_document
             resolution=encrypt_document(payload.resolution.encode(),_document_key(),ticket_id) if payload.resolution else None
             conn.execute("UPDATE ticket SET state=%s,decision=%s,resolution_ciphertext=%s,updated_at=now() WHERE id=%s",
                          (target,payload.decision,resolution,ticket_id))
-            conn.execute("INSERT INTO ticket_event(id,ticket_id,actor,action,created_at) VALUES (%s,%s,%s,%s,now())",
-                         (uuid4(),ticket_id,principal.email,f"STATE:{target}"))
+            details=encrypt_document(payload.details.encode(),_document_key(),ticket_id) if payload.details else None
+            conn.execute("INSERT INTO ticket_event(id,ticket_id,actor,action,detail_ciphertext,created_at) VALUES (%s,%s,%s,%s,%s,now())",
+                         (uuid4(),ticket_id,principal.email,f"DECISION:{payload.decision or target}",details))
             conn.execute("INSERT INTO audit_event(id,actor,action,object_type,object_id,request_id,result) VALUES (%s,%s,%s,%s,%s,%s,%s)",
                          (uuid4(),principal.email,"TICKET_UPDATED","ticket",ticket_id,uuid4(),target))
-    return {"id":str(ticket_id),"state":target}
+    return {"id":str(ticket_id),"state":target,"workflow_resumed":False}
 
 
 @app.get("/api/v1/resumes")
@@ -312,8 +360,169 @@ async def list_resumes(principal: Principal = Depends(_owner)):
         return {"mode":"DEMO","items":[]}
     with db.connection() as conn:
         items=conn.execute("""SELECT id::text,version,label,category,sha256,mime_type,size_bytes,
-          canonical,active,imported_at FROM resume ORDER BY imported_at DESC""").fetchall()
+          canonical,active,imported_at,page_count FROM resume ORDER BY imported_at DESC""").fetchall()
     return {"items":items}
+
+
+class ResumeFactInput(BaseModel):
+    ordinal: int = Field(ge=0, le=10000)
+    text: str = Field(min_length=1, max_length=5000)
+    page: int = Field(ge=1, le=20)
+    section: str = Field(min_length=1, max_length=80)
+    confidence: float = Field(ge=0, le=1)
+    sensitivity: Literal["NORMAL", "SENSITIVE", "LEGAL"] = "NORMAL"
+
+
+class ResumeFactImport(BaseModel):
+    source_sha256: str = Field(pattern="^[0-9a-f]{64}$")
+    source_revision: str = Field(min_length=7, max_length=64)
+    facts: list[ResumeFactInput] = Field(min_length=1, max_length=200)
+
+
+@app.post("/api/v1/resumes/{resume_id}/facts/import", status_code=201)
+async def import_resume_facts(resume_id: UUID, payload: ResumeFactImport,
+                              principal: Principal = Depends(_owner)):
+    if config.DEMO_MODE:
+        raise HTTPException(409,"demo mode does not accept personal candidate facts")
+    if len({item.ordinal for item in payload.facts}) != len(payload.facts):
+        raise HTTPException(422,"fact ordinals must be unique within a batch")
+    with db.connection() as conn:
+        with conn.transaction():
+            resume=conn.execute("""SELECT id,profile_id,sha256,page_count,canonical,active
+              FROM resume WHERE id=%s FOR SHARE""",(resume_id,)).fetchone()
+            if not resume or not resume["canonical"] or not resume["active"]:
+                raise HTTPException(404,"active canonical resume not found")
+            if resume["sha256"].strip() != payload.source_sha256:
+                raise HTTPException(409,"fact source does not match the active resume")
+            if not resume["page_count"]:
+                raise HTTPException(409,"canonical resume page count must be verified before fact import")
+            page_count=resume["page_count"]
+            from .storage import encrypt_document
+            key=_document_key(); inserted=0
+            for item in payload.facts:
+                try:
+                    fact=validate_resume_fact(ResumeFact(item.text,item.page,item.section,item.confidence,item.sensitivity),page_count)
+                except ValueError as exc:
+                    raise HTTPException(422,str(exc)) from None
+                fact_id=uuid4(); status=FactStatus.NEEDS_REVIEW
+                # Straightforward verbatim lines may be marked as resume evidence;
+                # this is explicitly distinct from owner approval.
+                if fact.confidence >= .95 and fact.sensitivity == "NORMAL":
+                    status=FactStatus.RESUME_VERIFIED
+                provenance={"source":"canonical-resume","source_sha256":payload.source_sha256,
+                            "source_revision":payload.source_revision,"page":fact.page,
+                            "section":fact.section,"ordinal":item.ordinal,
+                            "meaning":"document evidence only; not owner approval"}
+                result=conn.execute("""INSERT INTO candidate_fact(id,profile_id,resume_id,fact_ciphertext,
+                  source_sha256,source_kind,source_ordinal,page_number,section,confidence,sensitivity,status,provenance)
+                  VALUES (%s,%s,%s,%s,%s,'CANONICAL_RESUME',%s,%s,%s,%s,%s,%s,%s)
+                  ON CONFLICT (resume_id,source_sha256,source_ordinal) WHERE source_kind='CANONICAL_RESUME'
+                  DO NOTHING""",(fact_id,resume["profile_id"],resume_id,
+                  encrypt_document(fact.text.encode(),key,fact_id),payload.source_sha256,item.ordinal,
+                  fact.page,fact.section,fact.confidence,fact.sensitivity,status.value,Jsonb(provenance)))
+                inserted += result.rowcount
+            conn.execute("INSERT INTO audit_event(id,actor,action,object_type,object_id,request_id,result,metadata) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                         (uuid4(),principal.email,"CANONICAL_RESUME_FACTS_IMPORTED","resume",resume_id,uuid4(),
+                          f"{inserted} inserted",Jsonb({"source_sha256":payload.source_sha256,"batch_size":len(payload.facts)})))
+    return {"resume_id":str(resume_id),"received":len(payload.facts),"inserted":inserted,
+            "duplicates_skipped":len(payload.facts)-inserted,"status":"REVIEW WORKFLOW"}
+
+
+@app.get("/api/v1/profile/facts")
+async def list_candidate_facts(status: FactStatus | None = None, section: str | None = None,
+                               sensitivity: str | None = None, min_confidence: float | None = None,
+                               limit: int = 100, offset: int = 0,
+                               _: Principal = Depends(_owner)):
+    if config.DEMO_MODE:
+        return {"mode":"DEMO","items":[],"total":0}
+    if sensitivity and sensitivity not in {"NORMAL","SENSITIVE","LEGAL"}:
+        raise HTTPException(422,"invalid sensitivity filter")
+    if not 1 <= limit <= 200 or offset < 0 or (min_confidence is not None and not 0 <= min_confidence <= 1):
+        raise HTTPException(422,"invalid fact filter")
+    from .storage import decrypt_document
+    clauses=[]; params=[]
+    for column,value in (("status",status.value if status else None),("section",section.upper() if section else None),
+                         ("sensitivity",sensitivity),("confidence",min_confidence)):
+        if value is not None:
+            clauses.append(f"{column} >= %s" if column=="confidence" else f"{column}=%s"); params.append(value)
+    where=(" WHERE "+" AND ".join(clauses)) if clauses else ""
+    with db.connection() as conn:
+        rows=conn.execute("""SELECT id, fact_ciphertext, status, section, confidence, sensitivity,
+          source_kind,source_sha256,page_number,provenance,reviewed_at,reviewed_by
+          FROM candidate_fact"""+where+" ORDER BY section,page_number,created_at LIMIT %s OFFSET %s",
+          (*params,limit,offset)).fetchall()
+        total=conn.execute("SELECT count(*) FROM candidate_fact"+where,params).fetchone()[0]
+    key=_document_key(); items=[]
+    for row in rows:
+        try: text=decrypt_document(row["fact_ciphertext"],key,row["id"]).decode()
+        except Exception: raise HTTPException(503,"candidate fact decryption failed") from None
+        items.append({"id":str(row["id"]),"text":text,"status":row["status"],"section":row["section"],
+          "confidence":float(row["confidence"]),"sensitivity":row["sensitivity"],"source":row["source_kind"],
+          "source_sha256":row["source_sha256"].strip() if row["source_sha256"] else None,
+          "page":row["page_number"],"provenance":row["provenance"],"reviewed_at":row["reviewed_at"],
+          "reviewed_by":row["reviewed_by"]})
+    return {"items":items,"total":total,"limit":limit,"offset":offset}
+
+
+class FactReview(BaseModel):
+    fact_ids: list[UUID] = Field(min_length=1,max_length=100)
+    status: FactStatus
+
+
+class FactEdit(BaseModel):
+    text: str = Field(min_length=1,max_length=5000)
+
+
+@app.post("/api/v1/profile/facts/review")
+async def review_candidate_facts(payload: FactReview, principal: Principal = Depends(_owner)):
+    if config.DEMO_MODE:
+        return {"mode":"DEMO","changed":0}
+    if len(set(payload.fact_ids)) != len(payload.fact_ids):
+        raise HTTPException(422,"fact IDs must be unique")
+    with db.connection() as conn:
+        with conn.transaction():
+            rows=conn.execute("""SELECT id,status,source_kind,confidence,sensitivity FROM candidate_fact
+              WHERE id=ANY(%s) FOR UPDATE""",(payload.fact_ids,)).fetchall()
+            if len(rows) != len(payload.fact_ids):
+                raise HTTPException(404,"one or more candidate facts were not found")
+            for row in rows:
+                if not can_bulk_transition(FactStatus(row["status"]),payload.status,
+                    canonical=row["source_kind"]=="CANONICAL_RESUME",confidence=float(row["confidence"]),
+                    sensitivity=row["sensitivity"]):
+                    raise HTTPException(409,"requested status is not valid for every selected fact")
+            conn.execute("UPDATE candidate_fact SET status=%s,reviewed_by=%s,reviewed_at=now(),updated_at=now() WHERE id=ANY(%s)",
+                         (payload.status.value,principal.email,payload.fact_ids))
+            conn.execute("INSERT INTO audit_event(id,actor,action,object_type,request_id,result,metadata) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                         (uuid4(),principal.email,"CANDIDATE_FACTS_REVIEWED","candidate_fact",uuid4(),payload.status.value,
+                          Jsonb({"count":len(rows)})))
+    return {"changed":len(rows),"status":payload.status.value}
+
+
+@app.put("/api/v1/profile/facts/{fact_id}")
+async def edit_candidate_fact(fact_id: UUID, payload: FactEdit, principal: Principal = Depends(_owner)):
+    if config.DEMO_MODE:
+        raise HTTPException(409,"demo mode does not accept personal facts")
+    enforce_owner_limit(principal,"candidate-fact-edit",100,3600)
+    key=_document_key()
+    from .storage import encrypt_document
+    with db.connection() as conn:
+        with conn.transaction():
+            row=conn.execute("SELECT provenance,sensitivity FROM candidate_fact WHERE id=%s FOR UPDATE",(fact_id,)).fetchone()
+            if not row: raise HTTPException(404,"candidate fact not found")
+            provenance=dict(row["provenance"] or {})
+            provenance["previous_source_kind"]=provenance.get("source_kind","canonical-resume")
+            provenance["owner_edited"]=True
+            provenance["owner_editor"]="owner"
+            from .domain.resume_extract import CONTACT_TEXT,SENSITIVE_TEXT
+            inferred="LEGAL" if SENSITIVE_TEXT.search(payload.text) else "SENSITIVE" if CONTACT_TEXT.search(payload.text) else "NORMAL"
+            rank={"NORMAL":0,"SENSITIVE":1,"LEGAL":2}
+            sensitivity=max((row["sensitivity"],inferred),key=rank.__getitem__)
+            conn.execute("""UPDATE candidate_fact SET fact_ciphertext=%s,source_kind='OWNER_INPUT',
+              sensitivity=%s,status='NEEDS_REVIEW',reviewed_by=NULL,reviewed_at=NULL,provenance=%s,updated_at=now()
+              WHERE id=%s""",(encrypt_document(payload.text.strip().encode(),key,fact_id),sensitivity,Jsonb(provenance),fact_id))
+            conn.execute("INSERT INTO audit_event(id,actor,action,object_type,object_id,request_id,result) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                         (uuid4(),principal.email,"CANDIDATE_FACT_EDITED","candidate_fact",fact_id,uuid4(),"NEEDS_REVIEW"))
+    return {"id":str(fact_id),"status":"NEEDS_REVIEW"}
 
 
 class JobImport(BaseModel):
@@ -326,6 +535,44 @@ class JobImport(BaseModel):
     province: str | None = None
     work_mode: str | None = None
     external_id: str | None = None
+
+
+class PublicATSConfiguration(BaseModel):
+    provider: Literal["greenhouse", "lever"]
+    board_slug: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+    terms_reviewed: bool
+    enabled: bool = False
+
+
+@app.put("/api/v1/integrations/public-ats")
+async def configure_public_ats(payload: PublicATSConfiguration, principal: Principal = Depends(_owner)):
+    """Register one fixed-host public ATS board after an explicit owner terms review."""
+    if config.DEMO_MODE:
+        return {"mode":"DEMO","saved":False}
+    if not payload.terms_reviewed:
+        raise HTTPException(409,"review the source terms before enabling this public board")
+    from .providers.public_ats import PublicBoard
+    host={"greenhouse":"boards-api.greenhouse.io","lever":"api.lever.co"}[payload.provider]
+    try:
+        PublicBoard(payload.provider,host,payload.board_slug).url()
+    except ValueError:
+        raise HTTPException(422,"public ATS source configuration is invalid") from None
+    enforce_owner_limit(principal,"public-ats-config",10,3600)
+    source_name=f"{payload.provider}:{payload.board_slug.casefold()}"
+    identity=uuid4()
+    with db.connection() as conn:
+        with conn.transaction():
+            row=conn.execute("""INSERT INTO job_source(id,name,source_type,permitted,terms_reviewed_at,enabled,configuration)
+              VALUES (%s,%s,'API',true,now(),%s,%s)
+              ON CONFLICT(name) DO UPDATE SET source_type='API',permitted=true,terms_reviewed_at=now(),
+                enabled=excluded.enabled,configuration=excluded.configuration RETURNING id,enabled""",
+              (identity,source_name,payload.enabled,Jsonb({"provider":payload.provider,"board_slug":payload.board_slug}))).fetchone()
+            conn.execute("""INSERT INTO audit_event(id,actor,action,object_type,object_id,request_id,result,metadata)
+              VALUES (%s,%s,'PUBLIC_ATS_SOURCE_CONFIGURED','job_source',%s,%s,%s,%s)""",
+              (uuid4(),principal.email,row["id"],uuid4(),"ENABLED" if row["enabled"] else "DISABLED",
+               Jsonb({"provider":payload.provider,"terms_reviewed":True})))
+    return {"source":"public-ats","provider":payload.provider,"enabled":row["enabled"],
+            "terms_reviewed":True,"external_requests":False if not row["enabled"] else "scheduled"}
 
 
 SENSITIVE_FACTS = {"work_authorization", "immigration_status", "disability", "medical", "race", "ethnicity",
@@ -505,6 +752,13 @@ async def import_job(payload: JobImport, principal: Principal = Depends(_owner))
               (job_id,source["id"],job.company,job.title,job.description,job.location,job.province,
                job.work_mode,job.canonical_url,job.external_id,job.fingerprint,
                hashlib.sha256(job.description.encode()).hexdigest(),Jsonb({"source":job.source,"untrusted":True})))
+            description_hash=hashlib.sha256(job.description.encode("utf-8")).hexdigest()
+            conn.execute("INSERT INTO job_snapshot(id,job_id,content_hash,content) VALUES (%s,%s,%s,%s)",
+              (uuid4(),job_id,description_hash,Jsonb({"company":job.company,"title":job.title,
+               "location":job.location,"description":job.description,"canonical_url":job.canonical_url,
+               "source":job.source,"untrusted":True})))
+            from .tasks import _score_new_job
+            _score_new_job(conn,job_id)
             conn.execute("INSERT INTO audit_event(id,actor,action,object_type,object_id,request_id,result) VALUES (%s,%s,%s,%s,%s,%s,%s)",
                          (uuid4(),principal.email,"JOB_IMPORTED","job",job_id,uuid4(),"ACCEPTED"))
     return {"accepted":True,"duplicate":False,"job_id":str(job_id)}
@@ -569,19 +823,29 @@ async def upload_resume(request: Request, file: UploadFile, principal: Principal
     data = await file.read(MAX_UPLOAD_BYTES + 1)
     try:
         validate_pdf(file.filename or "", file.content_type or "", data)
+        from .domain.resume_extract import extract_resume
+        page_count, extracted_facts = extract_resume(data)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from None
+    except Exception:
+        # Parser diagnostics can contain document metadata and are intentionally withheld.
+        raise HTTPException(422, "resume PDF could not be safely parsed") from None
     display_name = safe_display_name(file.filename or "resume.pdf")
     key_file = os.getenv("DOCUMENT_ENCRYPTION_KEY_FILE")
     if not key_file:
         raise HTTPException(503, "document encryption unavailable")
     key = load_key_file(key_file)
-    # Check the database prerequisites before writing a private file. This avoids
-    # orphaned encrypted documents when profile setup has not been completed.
+    # A blank private profile can hold the initial resume until the owner completes
+    # profile setup. No candidate values are inferred into the profile here.
     with db.connection() as conn:
         profile = conn.execute("SELECT id FROM candidate_profile ORDER BY created_at LIMIT 1").fetchone()
         if not profile:
-            raise HTTPException(409, "profile setup is required before importing a resume")
+            profile_id=uuid4()
+            from .storage import encrypt_document
+            with conn.transaction():
+                conn.execute("INSERT INTO candidate_profile(id,facts_ciphertext) VALUES (%s,%s)",
+                             (profile_id,encrypt_document(b"{}",key,profile_id)))
+            profile={"id":profile_id}
         has_canonical = conn.execute("SELECT 1 FROM resume WHERE profile_id=%s AND canonical AND active LIMIT 1",
                                      (profile["id"],)).fetchone() is not None
         imported_at = datetime.now(timezone.utc)
@@ -589,14 +853,31 @@ async def upload_resume(request: Request, file: UploadFile, principal: Principal
         try:
           with conn.transaction():
             conn.execute("""INSERT INTO resume(id,profile_id,version,label,category,sha256,mime_type,size_bytes,
-              storage_key,canonical,active,imported_at,provenance) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+              storage_key,canonical,active,imported_at,provenance,page_count) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
               (doc_id,profile["id"],"resume-upload-"+doc_id.hex[:8],display_name,"Uncategorized",sha256,
                "application/pdf",len(data),storage_key,not has_canonical,not has_canonical,imported_at,
-               Jsonb({"imported_by":principal.email,"source":"owner-upload"})))
+               Jsonb({"imported_by":principal.email,"source":"owner-upload"}),page_count))
             conn.execute("""INSERT INTO document(id,profile_id,document_type,sha256,mime_type,size_bytes,
               storage_key,encrypted,provenance) VALUES (%s,%s,%s,%s,%s,%s,%s,true,%s)""",
               (doc_id,profile["id"],"CANONICAL_RESUME" if not has_canonical else "OTHER",sha256,"application/pdf",len(data),storage_key,
                Jsonb({"filename":display_name,"imported_by":principal.email})))
+            inserted_facts=0
+            if not has_canonical:
+                from .domain.resume_extract import ExtractedFact
+                for item in extracted_facts:
+                    fact_id=uuid4()
+                    status="RESUME_VERIFIED" if item.sensitivity=="NORMAL" else "NEEDS_REVIEW"
+                    provenance={"source":"canonical-resume","sha256":sha256,"page":item.page,
+                                "section":item.section,"ordinal":item.ordinal,
+                                "meaning":"document evidence only; not owner approval"}
+                    conn.execute("""INSERT INTO candidate_fact(id,profile_id,resume_id,fact_ciphertext,
+                      source_sha256,source_kind,source_ordinal,page_number,section,confidence,sensitivity,status,provenance)
+                      VALUES (%s,%s,%s,%s,%s,'CANONICAL_RESUME',%s,%s,%s,%s,%s,%s,%s)""",
+                      (fact_id,profile["id"],doc_id,encrypt_document(item.text.encode(),key,fact_id),sha256,
+                       item.ordinal,item.page,item.section,item.confidence,item.sensitivity,status,Jsonb(provenance)))
+                    inserted_facts+=1
+            else:
+                inserted_facts=0
         except Exception:
             # The file is encrypted and private; remove it only if the metadata
             # transaction failed so an unreferenced copy is not left behind.
@@ -608,8 +889,130 @@ async def upload_resume(request: Request, file: UploadFile, principal: Principal
             raise
     return {"id":str(doc_id),"filename":display_name,"mime_type":"application/pdf","size_bytes":len(data),
             "sha256":sha256,"canonical":not has_canonical,"active":not has_canonical,
-            "imported_at":imported_at.isoformat(),
+            "page_count":page_count,"facts_extracted":inserted_facts,"imported_at":imported_at.isoformat(),
             "audit":"Document imported; content excluded from logs"}
+
+
+class DocumentGenerate(BaseModel):
+    kind: Literal["ATS_RESUME","COVER_LETTER","SCREENING_PACKAGE","APPLICATION_SUMMARY"]
+    variant: Literal["A","B","C","D"] | None = None
+    job_id: UUID | None = None
+    application_id: UUID | None = None
+
+
+@app.post("/api/v1/documents/generate",status_code=201)
+async def generate_private_document(payload: DocumentGenerate, principal: Principal = Depends(_owner)):
+    if config.DEMO_MODE:
+        raise HTTPException(409,"demo mode does not generate personal documents")
+    if payload.job_id and payload.application_id:
+        raise HTTPException(422,"provide a job or application reference, not both")
+    if (payload.kind=="ATS_RESUME") != (payload.variant is not None):
+        raise HTTPException(422,"ATS resumes require one of the four defined variants")
+    enforce_owner_limit(principal,"document-generate",20,3600)
+    from .domain.document_generation import DocumentKind, generate_document
+    from .storage import store_private_blob
+    key=_document_key()
+    with db.connection() as conn:
+        profile=conn.execute("SELECT id FROM candidate_profile ORDER BY created_at LIMIT 1").fetchone()
+        if not profile:
+            raise HTTPException(409,"candidate profile setup is required")
+        resume=conn.execute("SELECT id FROM resume WHERE profile_id=%s AND canonical AND active LIMIT 1",
+                            (profile["id"],)).fetchone()
+        if not resume:
+            raise HTTPException(409,"an active canonical resume is required")
+        job=None;application_id=payload.application_id
+        if application_id:
+            job=conn.execute("""SELECT j.id,j.title,j.company FROM application a JOIN job j ON j.id=a.job_id
+              WHERE a.id=%s AND a.profile_id=%s""",(application_id,profile["id"])).fetchone()
+            if not job: raise HTTPException(404,"application not found")
+        elif payload.job_id:
+            job=conn.execute("SELECT id,title,company FROM job WHERE id=%s",(payload.job_id,)).fetchone()
+            if not job: raise HTTPException(404,"job not found")
+        facts=conn.execute("""SELECT id,fact_ciphertext,status,page_number,section,source_kind
+          FROM candidate_fact WHERE profile_id=%s ORDER BY section,page_number,source_ordinal LIMIT 500""",
+          (profile["id"],)).fetchall()
+    from .storage import decrypt_document
+    source_facts=[]
+    for fact in facts:
+        try: text=decrypt_document(fact["fact_ciphertext"],key,fact["id"]).decode("utf-8")
+        except Exception: raise HTTPException(503,"candidate evidence could not be decrypted") from None
+        source_facts.append({"id":str(fact["id"]),"text":text,"status":fact["status"],
+          "page":fact["page_number"],"section":fact["section"],"source":fact["source_kind"]})
+    variants={
+      "A":("Systems / Infrastructure",("linux","windows server","docker","proxmox","zfs","infrastructure","server","monitoring","backup","terraform","network")),
+      "B":("L2 / Desktop / Technical",("windows","endpoint","desktop","technical support","troubleshooting","incident","customer support","microsoft 365")),
+      "C":("Help Desk / L1",("help desk","service desk","technical support","troubleshooting","customer service","incident resolution")),
+      "D":("Cloud",("azure","aws","cloudflare","terraform","cloud","vnet","cloud computing")),
+    }
+    selected_facts=source_facts
+    if payload.variant:
+        _,keywords=variants[payload.variant]
+        selected_facts=[fact for fact in source_facts if any(word in fact["text"].casefold() for word in keywords)]
+        if not selected_facts:
+            raise HTTPException(409,"no verified canonical facts match this resume variant")
+    try:
+        generated=generate_document(DocumentKind(payload.kind),selected_facts,resume_active=True,
+          job_title=job["title"] if job else "",company=job["company"] if job else "")
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from None
+    data=generated.text.encode("utf-8")
+    identity,storage_key,sha256=store_private_blob(data,"txt",config.DOCUMENT_ROOT,key)
+    doc_type={"ATS_RESUME":"TAILORED_RESUME","COVER_LETTER":"COVER_LETTER",
+              "SCREENING_PACKAGE":"SCREENING_RESPONSE","APPLICATION_SUMMARY":"APPLICATION_SUMMARY"}[payload.kind]
+    provenance={"generator":"verified-fact-template-v1","source_fact_ids":[str(x["fact_id"]) for x in generated.provenance],
+      "variant":variants[payload.variant][0] if payload.variant else None,
+      "resume_base_id":str(resume["id"]),"job_id":str(job["id"]) if job else None,
+      "application_id":str(application_id) if application_id else None}
+    try:
+        with db.connection() as conn:
+            with conn.transaction():
+                conn.execute("""INSERT INTO document(id,profile_id,application_id,job_id,document_type,sha256,mime_type,
+                  size_bytes,storage_key,encrypted,resume_base_id,provenance)
+                  VALUES (%s,%s,%s,%s,%s,%s,'text/plain',%s,%s,true,%s,%s)""",
+                  (identity,profile["id"],application_id,job["id"] if job else None,doc_type,sha256,
+                   len(data),storage_key,resume["id"],Jsonb(provenance)))
+                conn.execute("""INSERT INTO audit_event(id,actor,action,object_type,object_id,request_id,result,metadata)
+                  VALUES (%s,%s,'PRIVATE_DOCUMENT_GENERATED','document',%s,%s,%s,%s)""",
+                  (uuid4(),principal.email,identity,uuid4(),doc_type,Jsonb({"sha256":sha256,"claim_count":len(generated.provenance)})))
+    except Exception:
+        try: (config.DOCUMENT_ROOT/storage_key).unlink()
+        except OSError: pass
+        raise
+    return {"id":str(identity),"document_type":doc_type,"mime_type":"text/plain","size_bytes":len(data),
+      "sha256":sha256,"claim_count":len(generated.provenance),"provenance":generated.provenance,
+      "download_url":f"/api/v1/documents/{identity}/download"}
+
+
+@app.get("/api/v1/documents")
+async def list_private_documents(_: Principal = Depends(_owner)):
+    if config.DEMO_MODE: return {"mode":"DEMO","items":[]}
+    with db.connection() as conn:
+        rows=conn.execute("""SELECT id::text,document_type,sha256,mime_type,size_bytes,created_at,
+          application_id::text,job_id::text,resume_base_id::text,provenance FROM document
+          WHERE document_type<>'CANONICAL_RESUME' ORDER BY created_at DESC LIMIT 200""").fetchall()
+    return {"items":[{**row,"download_url":f"/api/v1/documents/{row['id']}/download"} for row in rows]}
+
+
+@app.get("/api/v1/documents/{document_id}/download")
+async def download_private_document(document_id: UUID, principal: Principal = Depends(_owner)):
+    if config.DEMO_MODE: raise HTTPException(404,"document not found")
+    from .storage import decrypt_document
+    with db.connection() as conn:
+        row=conn.execute("SELECT sha256,mime_type,size_bytes,storage_key FROM document WHERE id=%s AND encrypted",
+                         (document_id,)).fetchone()
+    if not row or row["mime_type"]!="text/plain": raise HTTPException(404,"document not found")
+    if not re.fullmatch(r"[0-9a-f]{2}/[0-9a-f]{32}\.txt\.enc",row["storage_key"]):
+        raise HTTPException(500,"document metadata is invalid")
+    path=config.DOCUMENT_ROOT/row["storage_key"]
+    try:
+        if path.is_symlink() or not path.is_file(): raise OSError("unavailable")
+        data=decrypt_document(path.read_bytes(),_document_key(),document_id)
+    except Exception: raise HTTPException(500,"document could not be opened") from None
+    if len(data)!=row["size_bytes"] or hashlib.sha256(data).hexdigest()!=row["sha256"]:
+        raise HTTPException(500,"document integrity check failed")
+    return Response(data,media_type="text/plain; charset=utf-8",headers={
+      "Content-Disposition":"attachment; filename=bruteapply-document.txt","Cache-Control":"private, no-store",
+      "X-Content-Type-Options":"nosniff"})
 
 
 @app.get("/api/v1/resumes/{resume_id}/download")

@@ -8,11 +8,22 @@ class ApplicationState(StrEnum):
     DISCOVERED = "DISCOVERED"
     QUALIFIED = "QUALIFIED"
     SHORTLISTED = "SHORTLISTED"
+    PREPARING = "PREPARING"
     PREPARED = "PREPARED"
+    READY = "READY"
+    SUBMISSION_PENDING = "SUBMISSION_PENDING"
     ATTEMPTED = "ATTEMPTED"
+    SUBMISSION_ATTEMPTED = "SUBMISSION_ATTEMPTED"
     SUBMITTED = "SUBMITTED"
     SUBMISSION_UNVERIFIED = "SUBMISSION_UNVERIFIED"
     MANUAL_SUBMISSION_REQUIRED = "MANUAL_SUBMISSION_REQUIRED"
+    ASSESSMENT = "ASSESSMENT"
+    RECRUITER_SCREEN = "RECRUITER_SCREEN"
+    INTERVIEW_1 = "INTERVIEW_1"
+    INTERVIEW_2 = "INTERVIEW_2"
+    FINAL_INTERVIEW = "FINAL_INTERVIEW"
+    OFFER = "OFFER"
+    ON_HOLD = "ON_HOLD"
     REJECTED = "REJECTED"
     WITHDRAWN = "WITHDRAWN"
 
@@ -20,13 +31,44 @@ class ApplicationState(StrEnum):
 TRANSITIONS = {
     ApplicationState.DISCOVERED: {ApplicationState.QUALIFIED, ApplicationState.REJECTED},
     ApplicationState.QUALIFIED: {ApplicationState.SHORTLISTED, ApplicationState.REJECTED},
-    ApplicationState.SHORTLISTED: {ApplicationState.PREPARED, ApplicationState.REJECTED},
-    ApplicationState.PREPARED: {ApplicationState.ATTEMPTED, ApplicationState.MANUAL_SUBMISSION_REQUIRED,
+    ApplicationState.SHORTLISTED: {ApplicationState.PREPARING, ApplicationState.PREPARED, ApplicationState.REJECTED},
+    ApplicationState.PREPARING: {ApplicationState.PREPARED, ApplicationState.MANUAL_SUBMISSION_REQUIRED,
+                                  ApplicationState.REJECTED},
+    ApplicationState.PREPARED: {ApplicationState.READY, ApplicationState.ATTEMPTED, ApplicationState.MANUAL_SUBMISSION_REQUIRED,
                                  ApplicationState.REJECTED},
+    ApplicationState.READY: {ApplicationState.SUBMISSION_PENDING, ApplicationState.MANUAL_SUBMISSION_REQUIRED,
+                              ApplicationState.ON_HOLD, ApplicationState.REJECTED},
+    ApplicationState.SUBMISSION_PENDING: {ApplicationState.ATTEMPTED, ApplicationState.SUBMISSION_ATTEMPTED,
+                                           ApplicationState.MANUAL_SUBMISSION_REQUIRED,
+                                           ApplicationState.SUBMISSION_UNVERIFIED},
     ApplicationState.ATTEMPTED: {ApplicationState.SUBMITTED, ApplicationState.SUBMISSION_UNVERIFIED,
                                   ApplicationState.MANUAL_SUBMISSION_REQUIRED},
+    ApplicationState.SUBMISSION_ATTEMPTED: {ApplicationState.SUBMITTED, ApplicationState.SUBMISSION_UNVERIFIED,
+                                             ApplicationState.MANUAL_SUBMISSION_REQUIRED},
     ApplicationState.SUBMISSION_UNVERIFIED: {ApplicationState.SUBMITTED,
                                                ApplicationState.MANUAL_SUBMISSION_REQUIRED},
+    ApplicationState.SUBMITTED: {ApplicationState.ASSESSMENT, ApplicationState.RECRUITER_SCREEN,
+                                 ApplicationState.INTERVIEW_1, ApplicationState.REJECTED,
+                                 ApplicationState.WITHDRAWN, ApplicationState.ON_HOLD},
+    ApplicationState.ASSESSMENT: {ApplicationState.RECRUITER_SCREEN, ApplicationState.INTERVIEW_1,
+                                  ApplicationState.REJECTED, ApplicationState.WITHDRAWN,
+                                  ApplicationState.ON_HOLD},
+    ApplicationState.RECRUITER_SCREEN: {ApplicationState.INTERVIEW_1, ApplicationState.REJECTED,
+                                        ApplicationState.WITHDRAWN, ApplicationState.ON_HOLD},
+    ApplicationState.INTERVIEW_1: {ApplicationState.INTERVIEW_2, ApplicationState.FINAL_INTERVIEW,
+                                   ApplicationState.OFFER, ApplicationState.REJECTED,
+                                   ApplicationState.WITHDRAWN, ApplicationState.ON_HOLD},
+    ApplicationState.INTERVIEW_2: {ApplicationState.FINAL_INTERVIEW, ApplicationState.OFFER,
+                                   ApplicationState.REJECTED, ApplicationState.WITHDRAWN,
+                                   ApplicationState.ON_HOLD},
+    ApplicationState.FINAL_INTERVIEW: {ApplicationState.OFFER, ApplicationState.REJECTED,
+                                       ApplicationState.WITHDRAWN, ApplicationState.ON_HOLD},
+    ApplicationState.OFFER: {ApplicationState.WITHDRAWN, ApplicationState.ON_HOLD},
+    ApplicationState.ON_HOLD: {ApplicationState.READY, ApplicationState.SUBMITTED,
+                               ApplicationState.ASSESSMENT, ApplicationState.RECRUITER_SCREEN,
+                               ApplicationState.INTERVIEW_1, ApplicationState.INTERVIEW_2,
+                               ApplicationState.FINAL_INTERVIEW, ApplicationState.OFFER,
+                               ApplicationState.REJECTED, ApplicationState.WITHDRAWN},
 }
 
 

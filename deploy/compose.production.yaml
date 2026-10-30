@@ -137,6 +137,29 @@ services:
     mem_limit: 768m
     cpus: 1.0
 
+  scheduler:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    command: [celery, -A, app.tasks.celery_app, beat, --loglevel=INFO, --schedule=/tmp/celerybeat-schedule]
+    environment:
+      APP_ENV: production
+      REDIS_URL: redis://redis:6379/0
+      TZ: America/Toronto
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks: [data]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    init: true
+    restart: unless-stopped
+    mem_limit: 192m
+    cpus: 0.25
+
   web:
     build:
       context: ../frontend

@@ -40,3 +40,11 @@ def test_demo_mutations_reject_cross_site_origin():
         response=client.post("/api/v1/jobs/import",headers={"Origin":"https://evil.example"},json={"company":"Example","title":"Support","url":"https://example.com/job","source":"owner-import"})
     # Demo intentionally has no persistence, while production rejects non-owner origins.
     assert response.status_code == 202
+
+
+def test_demo_public_ats_configuration_does_not_enable_real_sources():
+    with TestClient(app) as client:
+        response=client.put("/api/v1/integrations/public-ats",json={
+            "provider":"greenhouse","board_slug":"example-board","terms_reviewed":True,"enabled":True})
+    assert response.status_code == 200
+    assert response.json()=={"mode":"DEMO","saved":False}
