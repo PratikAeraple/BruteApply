@@ -104,16 +104,16 @@ async def overview(_: Principal = Depends(_owner)):
     with db.connection() as conn:
         app_counts = conn.execute("SELECT state,count(*)::int AS count FROM application GROUP BY state").fetchall()
         job_counts = conn.execute("SELECT lifecycle,count(*)::int AS count FROM job GROUP BY lifecycle").fetchall()
-        tickets = conn.execute("SELECT count(*)::int FROM ticket WHERE state IN ('OPEN','IN_PROGRESS')").fetchone()[0]
-        jobs = conn.execute("SELECT count(*)::int FROM job").fetchone()[0]
+        tickets = conn.execute("SELECT count(*)::int AS count FROM ticket WHERE state IN ('OPEN','IN_PROGRESS')").fetchone()["count"]
+        jobs = conn.execute("SELECT count(*)::int AS count FROM job").fetchone()["count"]
         agent_rows=conn.execute("SELECT agent,enabled,paused,drain,emergency_stopped FROM agent_configuration").fetchall()
         latest_discovery=conn.execute("""SELECT state,started_at,completed_at,payload FROM worker_job
           WHERE task_name='public_ats_discovery' ORDER BY completed_at DESC NULLS LAST,started_at DESC LIMIT 1""").fetchone()
         successful_discovery=conn.execute("""SELECT completed_at FROM worker_job
           WHERE task_name='public_ats_discovery' AND state='SUCCEEDED'
           ORDER BY completed_at DESC LIMIT 1""").fetchone()
-        dead_letters=conn.execute("SELECT count(*)::int FROM worker_job WHERE state='DEAD_LETTER'").fetchone()[0]
-        qualified=conn.execute("SELECT count(*)::int FROM job WHERE lifecycle IN ('QUALIFIED','SHORTLISTED','PREPARED')").fetchone()[0]
+        dead_letters=conn.execute("SELECT count(*)::int AS count FROM worker_job WHERE state='DEAD_LETTER'").fetchone()["count"]
+        qualified=conn.execute("SELECT count(*)::int AS count FROM job WHERE lifecycle IN ('QUALIFIED','SHORTLISTED','PREPARED')").fetchone()["count"]
     result = {"mode":"PRODUCTION", "counts":{"discovered":jobs,"tickets":tickets},
               "components":{"database":"UP","queue":"UNKNOWN","worker":"UNKNOWN"},
               "workers":{},"discovery":{"last_run_state":latest_discovery["state"] if latest_discovery else "NOT RUN",
@@ -482,7 +482,7 @@ async def list_candidate_facts(status: FactStatus | None = None, section: str | 
           source_kind,source_sha256,page_number,provenance,reviewed_at,reviewed_by
           FROM candidate_fact"""+where+" ORDER BY section,page_number,created_at LIMIT %s OFFSET %s",
           (*params,limit,offset)).fetchall()
-        total=conn.execute("SELECT count(*) FROM candidate_fact"+where,params).fetchone()[0]
+        total=conn.execute("SELECT count(*) AS count FROM candidate_fact"+where,params).fetchone()["count"]
     key=_document_key(); items=[]
     for row in rows:
         try: text=decrypt_document(row["fact_ciphertext"],key,row["id"]).decode()
