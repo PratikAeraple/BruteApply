@@ -19,7 +19,7 @@ from celery.schedules import crontab
 from psycopg.types.json import Jsonb
 
 from . import config, db
-from .domain.jobs import normalize_job, target_job_scope
+from .domain.jobs import display_city, normalize_job, target_job_scope
 from .domain.matching import SKILL_ALIASES, score_job
 from .providers.public_ats import PublicATSProvider, PublicBoard
 
@@ -108,7 +108,7 @@ def _insert_job(conn, source_id, board_name: str, raw: dict) -> tuple[bool, obje
           description_fingerprint,requirements,source_evidence)
           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
           ON CONFLICT DO NOTHING RETURNING id""",
-          (identity,source_id,job.company,job.title,job.description,job.location,province,
+          (identity,source_id,job.company,job.title,job.description,display_city(job.location),province,
            scope["work_mode"],employment,salary_min,salary_max,currency,job.canonical_url,job.external_id,job.fingerprint,desc_hash,
            Jsonb({"category":scope["category"],"region":scope["province"],"scope_reviewed":"TARGET_ROLE_AND_GEOGRAPHY"}),
            Jsonb({"source":board_name,"untrusted":True,"retrieved_at":datetime.now(timezone.utc).isoformat()}))).fetchone()

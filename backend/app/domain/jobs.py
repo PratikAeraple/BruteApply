@@ -47,6 +47,25 @@ _PROVINCE_MARKERS = {
     "Alberta": re.compile(r"\b(alberta|AB|Calgary|Edmonton|Red Deer|Lethbridge)\b", re.I),
     "Manitoba": re.compile(r"\b(manitoba|MB|Winnipeg|Brandon)\b", re.I),
 }
+_TARGET_CITIES = (
+    "Toronto", "Ottawa", "Kitchener", "Waterloo", "Hamilton", "Mississauga", "Brampton",
+    "Markham", "London", "Windsor", "Kingston", "Guelph", "Barrie", "Sudbury",
+    "Calgary", "Edmonton", "Red Deer", "Lethbridge", "Winnipeg", "Brandon",
+)
+
+
+def display_city(location: str) -> str:
+    """Reduce ATS multi-location strings to target cities without losing remote scope."""
+    text = re.sub(r"\([^)]*\)", " ", location or "")
+    cities = [city for city in _TARGET_CITIES
+              if re.search(rf"\b{re.escape(city)}\b", text, re.I)]
+    cities.sort(key=lambda city: re.search(rf"\b{re.escape(city)}\b", text, re.I).start())
+    cities = list(dict.fromkeys(cities))
+    if cities:
+        return " / ".join(cities[:4])
+    if re.search(r"remote.{0,30}canada|canada.{0,30}remote", text, re.I):
+        return "Remote Canada"
+    return re.sub(r"\s+", " ", text).strip()[:120] or "Unspecified"
 
 
 def target_job_scope(title: str, location: str, work_mode: str | None = None) -> dict[str, str] | None:

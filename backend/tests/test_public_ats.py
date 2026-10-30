@@ -3,7 +3,7 @@ import pytest
 import asyncio
 
 from app.providers.public_ats import PublicATSProvider, PublicBoard
-from app.domain.jobs import target_job_scope
+from app.domain.jobs import display_city, target_job_scope
 
 
 def test_greenhouse_provider_uses_fixed_https_host_and_normalizes_untrusted_fields():
@@ -65,6 +65,11 @@ def test_target_job_scope_includes_requested_roles_and_regions(title,location,ex
 ])
 def test_target_job_scope_excludes_senior_unrelated_and_out_of_region(title,location):
     assert target_job_scope(title,location) is None
+
+
+def test_display_city_reduces_multi_location_ats_label_without_losing_cities():
+    assert display_city("Kitchener Ontario, Toronto, Ontario, Ontario (Remote)") == "Kitchener / Toronto"
+    assert display_city("Remote - Canada") == "Remote Canada"
 
 
 def test_provider_rejects_arbitrary_hosts_and_malformed_board_identifiers():
