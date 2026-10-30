@@ -40,6 +40,37 @@ def test_matching_uses_verified_skill_and_hard_blocker():
     assert blocked.score <= 24 and blocked.recommendation == "BLOCKED"
 
 
+def test_matching_uses_verbatim_fact_fragments_and_explains_profile_fit():
+    from app.domain.matching import score_job
+
+    result=score_job(
+        "Linux administration, Docker, and user support required",
+        {"Hands-on Linux administration", "Docker container operations"},
+        requirements=["linux", "docker", "support"],
+        location_fit=True, province_fit=True, work_mode_fit=False,
+        experience_fit=True, certification_fit=None, education_fit=None,
+        project_fit=True,
+    )
+    assert set(result.matched)=={"linux", "docker"}
+    assert result.missing==("support",)
+    assert result.score<=49
+    assert result.breakdown["skills"]==40
+    assert "work mode does not match" in result.explanation
+    assert "required certification" not in result.explanation
+
+
+def test_matching_unknown_dimensions_are_not_reported_as_matches_or_blockers():
+    from app.domain.matching import score_job
+
+    result=score_job("Entry-level Linux support", {"Linux support"},
+                     requirements=["linux"], province_fit=None, work_mode_fit=None,
+                     experience_fit=None, certification_fit=None, education_fit=None,
+                     project_fit=None)
+    assert result.score==100
+    assert result.blockers==()
+    assert "province" not in result.explanation
+
+
 def test_submission_requires_every_gate_and_emergency_stop_wins():
     ready = SubmissionContext(90,75,True,True,True,False,True,True,False,False,False,True,False)
     assert submission_decision(ready) == (True,"POLICY_PASSED")
