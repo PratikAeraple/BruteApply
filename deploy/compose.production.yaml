@@ -1,4 +1,4 @@
-name: bruteapply
+name: bruteapply-production
 
 # Private production topology. Public ingress is handled by Caddy after Access enforcement.
 services:
