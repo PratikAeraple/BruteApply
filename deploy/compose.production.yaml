@@ -11,6 +11,7 @@ services:
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       PGDATA: /var/lib/postgresql/data/pgdata
     secrets: [postgres_password]
+    group_add: ["1000"]
     volumes: [postgres_data:/var/lib/postgresql/data]
     networks: [data]
     read_only: true
@@ -57,6 +58,7 @@ services:
       APP_ENV: production
       DATABASE_URL_FILE: /run/secrets/database_url
     secrets: [database_url]
+    group_add: ["1000"]
     depends_on:
       db:
         condition: service_healthy
@@ -85,6 +87,7 @@ services:
       TIMEZONE: America/Toronto
       AUTONOMOUS_SUBMISSION_ENABLED: "false"
     secrets: [database_url, document_encryption_key]
+    group_add: ["1000"]
     volumes: [documents:/var/lib/bruteapply/documents]
     depends_on:
       db:
@@ -118,6 +121,7 @@ services:
     environment:
       <<: *application_environment
     secrets: [database_url, document_encryption_key]
+    group_add: ["1000"]
     volumes: [documents:/var/lib/bruteapply/documents]
     depends_on:
       db:

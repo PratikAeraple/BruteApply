@@ -233,6 +233,19 @@ def test_generated_private_blob_is_encrypted_and_randomly_named(tmp_path):
     with pytest.raises(ValueError): store_private_blob(contents,"pdf",tmp_path,key)
 
 
+def test_key_file_allows_private_secret_group_read_but_rejects_other_access(tmp_path):
+    import base64
+    from app.storage import load_key_file
+
+    path=tmp_path/"document-key"
+    path.write_text(base64.urlsafe_b64encode(b"k"*32).decode()+"\n")
+    path.chmod(0o640)
+    assert load_key_file(str(path))==b"k"*32
+    path.chmod(0o644)
+    with pytest.raises(RuntimeError,match="permissions"):
+        load_key_file(str(path))
+
+
 def test_public_repo_excludes_private_data_and_secrets():
     from pathlib import Path
     root=Path(__file__).resolve().parents[2]

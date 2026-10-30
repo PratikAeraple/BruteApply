@@ -37,7 +37,12 @@ def _key_from_file(path_value: str) -> bytes:
     if path.is_symlink() or not path.is_file():
         raise RuntimeError("document encryption key unavailable")
     info = path.stat()
-    if stat.S_IMODE(info.st_mode) & 0o077:
+    # Local Compose file-backed secrets retain host UID/GID ownership. The
+    # production app runs as UID 10001 and receives only the dedicated private
+    # secret group as a supplementary group; group-read is therefore allowed,
+    # while group write/execute and every other permission remain forbidden.
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & 0o027 or (info.st_uid != os.getuid() and info.st_gid not in os.getgroups()):
         raise RuntimeError("document encryption key permissions invalid")
     try:
         raw = base64.urlsafe_b64decode(path.read_text(encoding="ascii").strip())
