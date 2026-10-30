@@ -7,7 +7,7 @@ def test_demo_health_has_deterministic_identity_and_security_headers():
     with TestClient(app) as client:
         response=client.get("/healthz")
     assert response.status_code == 200
-    assert response.json() == {"status":"ok","application":"bruteapply","mode":"DEMO"}
+    assert response.json() == {"status":"ok","application":"bruteapply","mode":"DEMO","revision":"unknown"}
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["cache-control"] == "no-store"
 

@@ -50,9 +50,10 @@ def _read_regular(path: Path, *, maximum: int) -> bytes:
 
 
 def _manifest(root: Path, name: str) -> dict:
-    path = root / name
-    if path.is_absolute() or ".." in Path(name).parts:
+    relative = Path(name)
+    if relative.is_absolute() or ".." in relative.parts:
         raise RuntimeError("invalid manifest path")
+    path = root / relative
     value = json.loads(_read_regular(path, maximum=32_768))
     if not isinstance(value, dict):
         raise RuntimeError("invalid resume manifest")
