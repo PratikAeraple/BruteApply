@@ -1,7 +1,6 @@
 name: bruteapply
 
-# Prepared private production topology. Requires protected secrets and verified
-# exact-host Cloudflare Access before attaching web to the existing ingress.
+# Private production topology. Public ingress is handled by Caddy after Access enforcement.
 services:
   db:
     image: postgres:17.11-trixie@sha256:31ba9c94a03ada9988f2bb493a22a75eef3a185884533e5cdbcd498ea835b08f
@@ -236,8 +235,7 @@ services:
       API_INTERNAL_URL: http://api:8000
       NEXT_TELEMETRY_DISABLED: "1"
     networks:
-      application: {}
-      tunnel_ingress:
+      application:
         aliases: [bruteapply-web]
     read_only: true
     tmpfs:
@@ -261,9 +259,6 @@ networks:
     internal: true
   data:
     internal: true
-  tunnel_ingress:
-    external: true
-    name: brutehost-platform_tunnel_ingress
 
 volumes:
   postgres_data:
