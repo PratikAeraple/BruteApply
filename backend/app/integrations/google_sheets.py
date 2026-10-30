@@ -98,7 +98,7 @@ class GoogleSheetsSync:
                             or not snapshot.verified or not snapshot.snapshot_file_id):
             raise RuntimeError("a verified pre-write snapshot of this spreadsheet is required")
         for update in updates:
-            if update.column_index in FORMULA_COLUMNS or update.column_index not in SYSTEM_OWNED:
+            if update.column_index in FORMULA_COLUMNS or update.column_index not in (SYSTEM_OWNED|MERGEABLE):
                 raise ValueError("write plan includes a protected or owner-owned column")
             if update.row_number < 2 or update.row_number > 1000:
                 raise ValueError("write plan row is outside the existing tracker bounds")
@@ -139,6 +139,6 @@ def database_application_row(record: dict[str, Any]) -> list[Any]:
       12:record.get("source"),13:record.get("job_url"),14:record.get("resume_version"),
       15:record.get("cover_letter_state"),16:status,17:record.get("updated_at")}
     for index,value in values.items():
-        if index in SYSTEM_OWNED:
+        if index in SYSTEM_OWNED|MERGEABLE:
             row[index]=value.isoformat() if hasattr(value,"isoformat") else value
     return row
