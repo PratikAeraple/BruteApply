@@ -10,6 +10,7 @@ import asyncio
 from datetime import datetime, timezone
 import hashlib
 import logging
+import re
 from zoneinfo import ZoneInfo
 from uuid import uuid4
 
@@ -139,10 +140,10 @@ def _score_new_job(conn, job_id) -> bool:
     fact_text=[decrypt_document(row["fact_ciphertext"],key,row["id"]).decode("utf-8").casefold() for row in rows]
     verified_skills={skill for skill,aliases in SKILL_ALIASES.items()
                      if any(alias in text for alias in aliases for text in fact_text)}
-    job=conn.execute("SELECT description,province,city FROM job WHERE id=%s",(job_id,)).fetchone()
+    job=conn.execute("SELECT title,description,province,city,work_mode,requirements FROM job WHERE id=%s",(job_id,)).fetchone()
     if not job:
         return False
-    description=job["description"].casefold()
+    description=(job["title"]+" "+job["description"]).casefold()
     required=[skill for skill,aliases in SKILL_ALIASES.items()
               if any(alias in description for alias in aliases)]
     if not required:
@@ -150,7 +151,16 @@ def _score_new_job(conn, job_id) -> bool:
     # The discovery filter already establishes target role/region. Keep those
     # facts visible as fit dimensions while leaving years, language, legal and
     # certification declarations unknown until their source is owner-reviewed.
-    result=score_job(job["description"],verified_skills,requirements=required,
+    blockers=[]
+    extra_missing=[]
+    # Never treat an unverified language declaration as satisfied. The job
+    # remains visible for review but is kept out of the qualified shortlist.
+    if re.search(r"\bbilingual\b|\bfrench\s+(?:fluency|proficiency)\s+(?:is\s+)?required|\bfluent\s+in\s+french\b",description):
+        blockers.append("French/bilingual requirement is not confirmed by an owner-reviewed profile fact.")
+    years=re.search(r"\b(\d{1,2})\+?\s+years?\s+of\s+(?:relevant\s+)?(?:[a-z][a-z /&-]{0,40}\s+)?experience\b",description)
+    if years:
+        extra_missing.append(f"Posting requests {years.group(1)}+ years of experience; duration is not confirmed in the reviewed profile.")
+    result=score_job(description,verified_skills,requirements=required,blockers=blockers,
         seniority_fit=True,location_fit=True,province_fit=True,work_mode_fit=True)
     conn.execute("""INSERT INTO job_match(id,job_id,profile_id,score,confidence,matched,missing,
       hard_blockers,explanation,recommended_action) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
@@ -158,7 +168,7 @@ def _score_new_job(conn, job_id) -> bool:
       matched=excluded.matched,missing=excluded.missing,hard_blockers=excluded.hard_blockers,
       explanation=excluded.explanation,recommended_action=excluded.recommended_action,created_at=now()""",
       (uuid4(),job_id,profile["id"],result.score,result.confidence,Jsonb(result.matched),
-       Jsonb(result.missing),Jsonb(result.blockers),result.explanation,result.recommendation))
+       Jsonb([*result.missing,*extra_missing]),Jsonb(result.blockers),result.explanation,result.recommendation))
     if result.score>=65 and not result.blockers:
         conn.execute("UPDATE job SET lifecycle='QUALIFIED',updated_at=now() WHERE id=%s AND lifecycle='DISCOVERED'",
                      (job_id,))

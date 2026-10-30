@@ -40,6 +40,12 @@ def test_matching_uses_verified_skill_and_hard_blocker():
     assert blocked.score <= 24 and blocked.recommendation == "BLOCKED"
 
 
+def test_matching_keeps_unknown_profile_dimensions_out_of_a_perfect_score():
+    result=score_job("Technical support role in Ontario",{"support"},requirements=["support"],
+        seniority_fit=True,location_fit=True,province_fit=True,work_mode_fit=True)
+    assert result.score==85
+
+
 def test_matching_uses_verbatim_fact_fragments_and_explains_profile_fit():
     from app.domain.matching import score_job
 

@@ -87,9 +87,11 @@ def score_job(description: str, verified_skills: set[str], *, requirements: list
         # the rest refine ranking without overruling verified hard constraints.
         weights = {"seniority": 10, "location": 10, "province": 6, "work_mode": 5,
                    "experience": 8, "certifications": 4, "education": 4, "projects": 3}
-        available_weight = sum(weights[name] for name, _ in explicit)
         fit_points = sum(weights[name] for name, value in explicit if value)
-        dimensions["profile_fit"] = round(40 * fit_points / max(1, available_weight))
+        # Unknown dimensions earn no points but are not treated as failures.
+        # Dividing by the fixed total prevents a few known positive dimensions
+        # from making an otherwise incomplete assessment look perfect.
+        dimensions["profile_fit"] = round(40 * fit_points / sum(weights.values()))
     score = min(100, sum(dimensions.values()))
     if any(value is False for value in (seniority_fit, location_fit, province_fit, work_mode_fit,
                                         experience_fit, certification_fit, education_fit, project_fit)):
