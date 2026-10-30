@@ -21,7 +21,7 @@ def test_fake_ai_provider_is_isolated_and_deterministic():
 
 
 def test_openai_provider_uses_structured_output_and_no_storage(tmp_path):
-    key=tmp_path/"api-key";key.write_text("test-secret\n");os.chmod(key,0o600)
+    key=tmp_path/"api-key";key.write_text("test-secret\n");os.chmod(key,0o640)
     seen={}
     def response(request):
         seen["payload"]=json.loads(request.content)

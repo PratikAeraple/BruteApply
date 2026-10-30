@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
 import stat
 import time
@@ -29,7 +30,10 @@ class GoogleOAuthREST:
     def __init__(self, credential_file: str, *, transport: httpx.BaseTransport | None = None,
                  clock=lambda: datetime.now(timezone.utc), sleep=time.sleep):
         path=Path(credential_file)
-        if path.is_symlink() or not path.is_file() or stat.S_IMODE(path.stat().st_mode) & 0o077:
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError("Google OAuth credential file is unavailable or too broadly readable")
+        info=path.stat(); mode=stat.S_IMODE(info.st_mode)
+        if mode not in {0o400,0o600,0o640} or (info.st_uid!=os.getuid() and info.st_gid not in os.getgroups()):
             raise RuntimeError("Google OAuth credential file is unavailable or too broadly readable")
         try:
             credentials=json.loads(path.read_text(encoding="utf-8"))

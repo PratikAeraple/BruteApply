@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 import asyncio
 import json
+import os
 from pathlib import Path
 import stat
 import re
@@ -64,8 +65,8 @@ def _read_api_key(path_value: str) -> str:
     path=Path(path_value)
     if path.is_symlink() or not path.is_file():
         raise RuntimeError("AI credential file unavailable")
-    mode=stat.S_IMODE(path.stat().st_mode)
-    if mode & 0o077:
+    info=path.stat(); mode=stat.S_IMODE(info.st_mode)
+    if mode not in {0o400,0o600,0o640} or (info.st_uid!=os.getuid() and info.st_gid not in os.getgroups()):
         raise RuntimeError("AI credential file permissions invalid")
     value=path.read_text(encoding="utf-8").strip()
     if not value or "\n" in value:

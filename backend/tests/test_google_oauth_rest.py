@@ -35,6 +35,11 @@ def test_google_rest_rejects_credential_with_broad_permissions(tmp_path):
         GoogleOAuthREST(str(path))
 
 
+def test_google_rest_allows_group_readable_owner_runtime_secret(tmp_path):
+    path=_credential_file(tmp_path);path.chmod(0o640)
+    assert GoogleOAuthREST(str(path),transport=httpx.MockTransport(lambda _:httpx.Response(500)))
+
+
 def test_google_rest_redacts_provider_error_body(tmp_path):
     def handler(request):
         if request.url.host=="oauth2.googleapis.com":
