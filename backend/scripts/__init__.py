@@ -1,1 +1,0 @@
-"""BruteApply local administration scripts."""
