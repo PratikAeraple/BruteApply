@@ -172,6 +172,13 @@ def _score_new_job(conn, job_id) -> bool:
     if result.score>=65 and not result.blockers:
         conn.execute("UPDATE job SET lifecycle='QUALIFIED',updated_at=now() WHERE id=%s AND lifecycle='DISCOVERED'",
                      (job_id,))
+    else:
+        # A re-score may discover a newly explicit blocker (for example a
+        # language requirement). Withdraw only an un-applied qualification;
+        # never rewrite a job already linked to an application.
+        conn.execute("""UPDATE job SET lifecycle='DISCOVERED',updated_at=now()
+          WHERE id=%s AND lifecycle='QUALIFIED'
+          AND NOT EXISTS (SELECT 1 FROM application WHERE application.job_id=job.id)""",(job_id,))
     return True
 
 
