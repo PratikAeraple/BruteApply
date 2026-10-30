@@ -42,7 +42,7 @@ def _key_from_file(path_value: str) -> bytes:
     # secret group as a supplementary group; group-read is therefore allowed,
     # while group write/execute and every other permission remain forbidden.
     mode = stat.S_IMODE(info.st_mode)
-    if mode & 0o027 or (info.st_uid != os.getuid() and info.st_gid not in os.getgroups()):
+    if mode not in {0o600, 0o640} or (info.st_uid != os.getuid() and info.st_gid not in os.getgroups()):
         raise RuntimeError("document encryption key permissions invalid")
     try:
         raw = base64.urlsafe_b64decode(path.read_text(encoding="ascii").strip())

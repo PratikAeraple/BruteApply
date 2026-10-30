@@ -50,6 +50,7 @@ services:
       retries: 3
 
   migrate:
+    image: bruteapply-api:${BRUTEAPPLY_REVISION:?set full immutable source revision}
     build:
       context: ../backend
       dockerfile: Dockerfile
@@ -71,6 +72,7 @@ services:
     cpus: 0.5
 
   api:
+    image: bruteapply-api:${BRUTEAPPLY_REVISION:?set full immutable source revision}
     build:
       context: ../backend
       dockerfile: Dockerfile
@@ -86,6 +88,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       TIMEZONE: America/Toronto
       AUTONOMOUS_SUBMISSION_ENABLED: "false"
+      SOURCE_REVISION: ${BRUTEAPPLY_REVISION:?set full immutable source revision}
     secrets: [database_url, document_encryption_key]
     group_add: ["1000"]
     volumes: [documents:/var/lib/bruteapply/documents]
@@ -114,6 +117,7 @@ services:
       start_period: 30s
 
   worker:
+    image: bruteapply-api:${BRUTEAPPLY_REVISION:?set full immutable source revision}
     build:
       context: ../backend
       dockerfile: Dockerfile
@@ -130,7 +134,7 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    networks: [data, egress]
+    networks: [data]
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=32m
@@ -142,6 +146,7 @@ services:
     cpus: 1.0
 
   scheduler:
+    image: bruteapply-api:${BRUTEAPPLY_REVISION:?set full immutable source revision}
     build:
       context: ../backend
       dockerfile: Dockerfile
@@ -164,7 +169,46 @@ services:
     mem_limit: 192m
     cpus: 0.25
 
+  private-resume-bootstrap:
+    profiles: [bootstrap]
+    image: bruteapply-api:${BRUTEAPPLY_REVISION:?set full immutable source revision}
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    command: [python, scripts/import_private_resume.py, --source-dir, /run/bruteapply-bootstrap]
+    environment:
+      APP_ENV: production
+      DATABASE_URL_FILE: /run/secrets/database_url
+      DOCUMENT_ENCRYPTION_KEY_FILE: /run/secrets/document_encryption_key
+      DOCUMENT_ROOT: /var/lib/bruteapply/documents
+    secrets: [database_url, document_encryption_key]
+    group_add: ["1000"]
+    volumes:
+      - documents:/var/lib/bruteapply/documents
+      - type: bind
+        source: ${BRUTEAPPLY_BOOTSTRAP_DIR:?set owner-only encrypted bootstrap directory}
+        target: /run/bruteapply-bootstrap
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks: [data]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    init: true
+    restart: "no"
+    mem_limit: 512m
+    cpus: 0.5
+
   web:
+    image: bruteapply-web:${BRUTEAPPLY_REVISION:?set full immutable source revision}
     build:
       context: ../frontend
       dockerfile: Dockerfile
@@ -197,7 +241,6 @@ networks:
     internal: true
   data:
     internal: true
-  egress: {}
   tunnel_ingress:
     external: true
     name: brutehost-platform_tunnel_ingress

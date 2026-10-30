@@ -80,7 +80,8 @@ async def security_headers(request: Request, call_next):
 
 @app.get("/healthz")
 async def healthz():
-    return {"status": "ok", "application": "bruteapply", "mode": "DEMO" if config.DEMO_MODE else "PRODUCTION"}
+    return {"status": "ok", "application": "bruteapply", "mode": "DEMO" if config.DEMO_MODE else "PRODUCTION",
+            "revision": config.SOURCE_REVISION}
 
 
 @app.get("/readyz")
@@ -89,7 +90,7 @@ async def readyz():
         return {"status": "ready", "application": "bruteapply-demo"}
     if not db.ready():
         raise HTTPException(503, "not ready")
-    return {"status": "ready", "application": "bruteapply"}
+    return {"status": "ready", "application": "bruteapply", "revision": config.SOURCE_REVISION}
 
 
 def _owner(principal: Principal = Depends(require_owner)) -> Principal:

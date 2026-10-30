@@ -246,6 +246,19 @@ def test_key_file_allows_private_secret_group_read_but_rejects_other_access(tmp_
         load_key_file(str(path))
 
 
+def test_runtime_secret_file_allows_only_owner_or_private_group_read(monkeypatch,tmp_path):
+    from app.config import ConfigurationError, _secret
+
+    path=tmp_path/"runtime-secret"
+    path.write_text("synthetic-test-value")
+    path.chmod(0o640)
+    monkeypatch.setenv("TEST_SECRET_FILE",str(path))
+    assert _secret("TEST_SECRET")=="synthetic-test-value"
+    path.chmod(0o644)
+    with pytest.raises(ConfigurationError):
+        _secret("TEST_SECRET")
+
+
 def test_public_repo_excludes_private_data_and_secrets():
     from pathlib import Path
     root=Path(__file__).resolve().parents[2]

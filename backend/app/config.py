@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 from pathlib import Path
 
@@ -16,8 +17,9 @@ def _secret(name: str) -> str | None:
     path = Path(path_value)
     if path.is_symlink() or not path.is_file():
         raise ConfigurationError(f"invalid secret file for {name}")
-    mode = stat.S_IMODE(path.stat().st_mode)
-    if mode & 0o037:
+    info = path.stat()
+    mode = stat.S_IMODE(info.st_mode)
+    if mode not in {0o600, 0o640} or (info.st_uid != os.getuid() and info.st_gid not in os.getgroups()):
         raise ConfigurationError(f"secret file for {name} is too broadly readable")
     return path.read_text(encoding="utf-8").strip()
 
@@ -33,6 +35,7 @@ DOCUMENT_ROOT = Path(os.getenv("DOCUMENT_ROOT", "/var/lib/bruteapply/documents")
 DOCUMENT_KEY = _secret("DOCUMENT_ENCRYPTION_KEY")
 TIMEZONE = os.getenv("TIMEZONE", "America/Toronto")
 AUTONOMOUS_SUBMISSION_ENABLED = os.getenv("AUTONOMOUS_SUBMISSION_ENABLED", "false").lower() == "true"
+SOURCE_REVISION = os.getenv("SOURCE_REVISION", "unknown")
 
 
 def validate_production_config() -> None:
@@ -44,6 +47,8 @@ def validate_production_config() -> None:
         raise ConfigurationError("an explicit owner identity is required")
     if not ACCESS_ISSUER or not ACCESS_AUD:
         raise ConfigurationError("exact Cloudflare Access issuer and audience are required")
+    if not re.fullmatch(r"[0-9a-f]{40}", SOURCE_REVISION):
+        raise ConfigurationError("a full immutable BruteApply source revision is required")
     if not DATABASE_URL or not DATABASE_URL.startswith("postgresql"):
         raise ConfigurationError("a PostgreSQL secret file is required")
     if not DOCUMENT_KEY:

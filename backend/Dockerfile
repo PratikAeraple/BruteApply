@@ -7,6 +7,7 @@ FROM python:3.12.16-slim-trixie@sha256:8523d6abeb48ceae0b7240d30c5808fc26cb79c1a
 ENV PATH=/install/bin:$PATH PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app:/install/lib/python3.12/site-packages
 WORKDIR /app
 RUN groupadd --system --gid 10001 bruteapply && useradd --system --uid 10001 --gid bruteapply --home-dir /nonexistent --shell /usr/sbin/nologin bruteapply
+RUN mkdir -p /var/lib/bruteapply/documents && chown 10001:10001 /var/lib/bruteapply/documents
 COPY --from=dependencies /install /install
 COPY --chown=10001:10001 app ./app
 COPY --chown=10001:10001 migrations ./migrations
