@@ -37,5 +37,8 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
-      - run: npm run build
+      - name: Build fail-closed production dashboard
+        run: NEXT_PUBLIC_APP_MODE=production npm run build
+      - name: Build isolated synthetic demo dashboard
+        run: NEXT_PUBLIC_APP_MODE=demo npm run build
       - run: npm audit --omit=dev
