@@ -1,25 +1,26 @@
 # Deployment
 
-## Current status
+## Production boundary
 
-Local synthetic demo source is implemented. Production deployment is **not activated**. Do not create DNS, Tunnel, Access, containers or production secrets from this template until the exact hostname has an owner-controlled Access boundary and protected runtime provisioning is ready.
+BruteApply runs at `https://jobapply.brutehack.com` behind an exact-host Cloudflare Access application. Access allows only the owner identity. The frontend proxies same-origin `/api/*` requests to the private FastAPI service and forwards only the request headers needed for the API to validate the signed Cloudflare Access assertion and same-origin writes. The API independently checks signature, issuer, audience, expiry and owner email.
 
-## Required production components
+The production Compose project is `bruteapply-production`. PostgreSQL, Redis, API, worker, scheduler and frontend have no published host ports. The web/API/data networks are private. Only the public ATS discovery worker joins `bruteapply-production_discovery_egress`; it calls fixed HTTPS Greenhouse or Lever public-posting endpoints, disables redirects, does not follow job URLs, and discards postings outside the requested support-role/Canadian-region filter. No database, document, or credential service is attached to the egress-only network.
 
-1. Create an exact-host Cloudflare Access application for `jobapply.brutehack.com` and allow only the owner identity provisioned in protected runtime configuration. Do not add wildcard scope or edit another Access application.
-2. Existing Cloudflare Tunnel and private Caddy routing, exact hostname only.
-3. Isolated web/API, worker, PostgreSQL and Redis services on private Compose networks.
-4. Read-only/non-root runtime where compatible, dropped capabilities, no-new-privileges, resource limits, health checks, no published application ports, no Docker socket.
-5. PostgreSQL and Redis private volumes; documents outside the web root encrypted with AES-GCM.
-6. Protected secret files for database credentials, document encryption key, and any separately approved OAuth/AI credentials.
-7. Migrations run as a controlled one-shot task; app readiness must require database connectivity.
+Production images use the full immutable source revision (`BRUTEAPPLY_REVISION`). Update the protected production environment's revision without printing its values, validate Compose, build the necessary image, and recreate only the changed services using the standard `bruteapply-production` project name. Never remove production volumes during deployment or rollback.
 
-Production images are tagged with the full 40-character source revision (`BRUTEAPPLY_REVISION`); record each resulting image ID/digest with the deployment. Discovery remains disabled by database policy, and the initial worker has no external-egress network. After an owner enables a reviewed public source, add only the required worker egress path as a reviewed deployment change.
+## Safe-ramp controls
 
-## Owner-encrypted resume bootstrap
+- Canonical resume and provenance-linked facts live in private persistent storage; the source PDF is not in Git.
+- Discovery is limited to explicitly configured, reviewed public ATS boards. It does not scrape restricted platforms or submit applications.
+- Google Sheets sync remains disabled until OAuth, a recoverable pre-write snapshot, schema validation and a controlled copy-based test pass.
+- OpenAI, Gmail and Calendar remain disabled until separately configured. Fake AI is test-only.
+- Real autonomous submission is disabled; the persisted emergency stop remains active.
+- Production backups remain **DEFERRED / NOT IMPLEMENTED**.
 
-`backend/scripts/import_private_resume.py` is a one-shot private bootstrap task. It validates the owner-provided encrypted canonical and superseded resume manifests, decrypts only in process memory, checks the canonical SHA-256/page count and exact 104 page/section fact matches against a fresh PDF extraction, and re-encrypts the documents and each fact under fresh IDs into the private document volume. Normal resume upload/API behavior is unchanged. Sensitive/contact facts stay in `NEEDS_REVIEW`; ordinary verbatim facts can be `RESUME_VERIFIED`, which records document evidence but is not owner approval. The importer is idempotent and fails closed on a checksum, source, page, or provenance mismatch. It prints aggregate counts only.
+## Validation
 
-For local Docker Compose file-backed secrets, keep the host secret directory owner-only and the individual source files owner/group readable only (`0640`, no group write or other access). Only services that need these mounted files receive the owner's private supplementary group. The API, worker, migration, database, and one-shot bootstrap use the secret mount; the frontend and scheduler do not. The document volume is created with UID/GID `10001:10001` ownership in the backend image so the non-root API/worker can maintain its `0700` root and `0600` encrypted files without a privileged runtime container.
+Validate with the documented locked backend test image, frontend lint/typecheck/production build, dependency audit, secret/privacy scans, Compose validation, and private service health checks. A public unauthenticated request must receive Cloudflare Access behavior, never the application dashboard. Owner-authenticated browser requests should return production API data; an invalid or missing Access assertion must continue to receive 401 from the API.
 
-Production activation remains gated on Cloudflare Access, secret provisioning, database/worker validation, canonical resume onboarding, Google authorization, first-write Sheet snapshot, monitoring and recovery review. No autonomous submission is enabled by the deployment template.
+## Rollback
+
+For an application-only code regression, restore the previous immutable image tag and recreate only the affected BruteApply service. Do not remove PostgreSQL, Redis or private document volumes. For public-boundary failures, remove only the exact `jobapply.brutehack.com` route/record under the existing rollback procedure. Do not change other Access applications, routes, DNS, or zone TLS settings.

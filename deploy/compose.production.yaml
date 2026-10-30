@@ -139,7 +139,7 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    networks: [data]
+    networks: [data, discovery_egress]
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=32m
@@ -259,6 +259,14 @@ networks:
     internal: true
   data:
     internal: true
+  # Only the public ATS discovery worker joins this outbound-only bridge.
+  # Its provider client is pinned to public Greenhouse/Lever HTTPS origins,
+  # rejects redirects, and never follows posting URLs.
+  discovery_egress:
+    name: bruteapply-production_discovery_egress
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_icc: "false"
 
 volumes:
   postgres_data:

@@ -2,7 +2,7 @@
 
 **An owner-controlled job-search operations platform** for discovering, evaluating and tracking IT opportunities. BruteApply combines explainable matching, private document management, ticketed human decisions and an auditable application lifecycle.
 
-> **Status:** foundation build. Demo mode uses synthetic data only. Production integrations and the protected production hostname are not activated. Real autonomous submission is disabled.
+> **Status:** private safe-ramp production at `jobapply.brutehack.com`. The public source repository contains only application code and synthetic demo fixtures. Real autonomous submission is disabled.
 
 ## Why it exists
 
@@ -12,11 +12,11 @@ Job-search work is spread across postings, resumes, applications, follow-ups, re
 
 - FastAPI service with Cloudflare Access JWT validation required outside demo mode.
 - PostgreSQL schema/migrations for profiles, verified facts, jobs, matches, applications, documents, tickets, integrations, workers and audit events.
-- Redis-backed Celery worker and daily scheduler with bounded retries and late acknowledgements. Greenhouse/Lever public-board discovery is implemented but remains inactive until a board is explicitly configured and terms-reviewed. OAuth-dependent sync, email/calendar, AI production use and real submission remain gated.
+- Redis-backed Celery worker and three conservative daily discovery windows with bounded retries and late acknowledgements. Greenhouse/Lever public-board discovery is limited to explicitly configured public boards and requested support roles in the target Canadian regions. OAuth-dependent sync, email/calendar, AI production use and real submission remain gated.
 - Deterministic job normalization, fingerprinting, hard-blocker checks and explainable scoring.
 - Safe submission-policy gate: unknown facts, sensitive declarations, access controls, CAPTCHA/MFA, duplicate history or unsupported automation stop the flow and create a ticket.
 - Synthetic-data dashboard for local exploration. Demo mode cannot contact the production database, Google, email, OpenAI or job providers. Production-mode private document generation uses only verbatim provenance-checked facts.
-- The canonical resume source is preserved outside this repository. A verified encrypted local copy exists in owner-only state; it has not been imported into a production database. No personal profile, real application, document or credential is included here.
+- The canonical resume and candidate facts are registered in the private production database and encrypted document volume. They are not present in this repository. No personal profile, real application, document or credential is included here.
 
 ## Architecture
 
@@ -38,7 +38,7 @@ flowchart LR
   API --- DB
 ```
 
-The intended private deployment is Cloudflare Access → exact `jobapply.brutehack.com` route → BruteHost private proxy → frontend/API, with private PostgreSQL, Redis and document storage. No wildcard route or public database/cache port is used.
+The private deployment is Cloudflare Access → exact `jobapply.brutehack.com` route → BruteHost private proxy → frontend/API, with private PostgreSQL, Redis and document storage. Only the public ATS discovery worker has a dedicated outbound Docker bridge; all application/data services remain on private networks. No wildcard route or public database/cache port is used.
 
 See [ARCHITECTURE.md](docs/ARCHITECTURE.md), [SECURITY.md](docs/SECURITY.md), [THREAT-MODEL.md](docs/THREAT-MODEL.md), [DEPLOYMENT.md](docs/DEPLOYMENT.md), [OPERATIONS.md](docs/OPERATIONS.md), [RECOVERY.md](docs/RECOVERY.md), [GOOGLE-SHEETS.md](docs/GOOGLE-SHEETS.md), [JOB-SOURCES.md](docs/JOB-SOURCES.md), [APPLICATION-POLICY.md](docs/APPLICATION-POLICY.md), [AI-SAFETY.md](docs/AI-SAFETY.md), and [PRIVACY.md](docs/PRIVACY.md).
 

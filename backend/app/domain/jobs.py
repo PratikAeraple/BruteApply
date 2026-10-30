@@ -34,6 +34,41 @@ def fingerprint(company: str, title: str, location: str, description: str) -> st
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+_TARGET_TITLE = re.compile(
+    r"\b(help\s*desk|service\s*desk|it support|technical support|product support analyst|desktop support|"
+    r"field service (?:technician|support)|field (?:service|support) technician|"
+    r"endpoint support|systems? support|it technician|network technician|"
+    r"noc (?:technician|analyst)|cloud support|microsoft 365 support|"
+    r"systems? administrator|infrastructure (?:support|technician)|operations support)\b", re.I)
+_EXCLUDED_TITLE = re.compile(r"\b(senior|sr\.?|lead|principal|architect|manager|director|head|vp)\b", re.I)
+_PROVINCE_MARKERS = {
+    "Ontario": re.compile(r"\b(ontario|ON|Toronto|Ottawa|Kitchener|Waterloo|Hamilton|Mississauga|"
+                          r"Brampton|Markham|London|Windsor|Kingston|Guelph|Barrie|Sudbury)\b", re.I),
+    "Alberta": re.compile(r"\b(alberta|AB|Calgary|Edmonton|Red Deer|Lethbridge)\b", re.I),
+    "Manitoba": re.compile(r"\b(manitoba|MB|Winnipeg|Brandon)\b", re.I),
+}
+
+
+def target_job_scope(title: str, location: str, work_mode: str | None = None) -> dict[str, str] | None:
+    """Keep only requested support/infrastructure roles and target Canadian regions."""
+    if not isinstance(title, str) or not _TARGET_TITLE.search(title) or _EXCLUDED_TITLE.search(title):
+        return None
+    place = f"{location or ''} {work_mode or ''}".strip()
+    province = next((name for name, marker in _PROVINCE_MARKERS.items() if marker.search(place)), None)
+    remote_canada = bool(re.search(r"remote.{0,30}canada|canada.{0,30}remote", place, re.I))
+    if not province and not remote_canada:
+        return None
+    lowered = place.casefold()
+    mode = next((value for marker, value in (("remote", "Remote"), ("hybrid", "Hybrid"),
+                 ("on-site", "On-site"), ("onsite", "On-site"), ("field", "Field / Multi-site"))
+                if marker in lowered), "Unspecified")
+    category = ("L1 / Help Desk" if re.search(r"help\s*desk|service\s*desk|it support|support analyst", title, re.I)
+                else "L2 / Desktop / Technical" if re.search(r"desktop|technical support|field|endpoint", title, re.I)
+                else "Systems / Infrastructure" if re.search(r"system|infrastructure|network|noc", title, re.I)
+                else "Cloud-oriented")
+    return {"province": province or "Remote Canada", "work_mode": mode, "category": category}
+
+
 @dataclass(frozen=True)
 class NormalizedJob:
     company: str

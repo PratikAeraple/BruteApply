@@ -3,6 +3,7 @@ import pytest
 import asyncio
 
 from app.providers.public_ats import PublicATSProvider, PublicBoard
+from app.domain.jobs import target_job_scope
 
 
 def test_greenhouse_provider_uses_fixed_https_host_and_normalizes_untrusted_fields():
@@ -27,6 +28,43 @@ def test_lever_provider_reads_public_json_not_html():
             "descriptionPlain":"Troubleshoot endpoints"}])
     provider=PublicATSProvider(PublicBoard("lever","api.lever.co","acme"),transport=httpx.MockTransport(handler))
     assert asyncio.run(provider.discover())[0]["company"] == "acme"
+
+
+def test_ats_provider_preserves_owner_friendly_company_and_allowed_metadata():
+    provider=PublicATSProvider(PublicBoard("lever","api.lever.co","getmaple","Maple"),
+        transport=httpx.MockTransport(lambda request:httpx.Response(200,json=[{
+            "id":"1","text":"IT Support Specialist","hostedUrl":"https://jobs.lever.co/getmaple/1",
+            "categories":{"location":"Toronto, Ontario","commitment":"Full-time"},
+            "workplaceType":"hybrid","salaryRange":{"min":60000,"max":68000},
+            "descriptionPlain":"Windows troubleshooting"}])))
+    row=asyncio.run(provider.discover())[0]
+    assert row["company"]=="Maple"
+    assert row["work_mode"]=="Hybrid"
+    assert row["employment_type"]=="Full-time"
+    assert row["salary"]["min"]==60000
+
+
+@pytest.mark.parametrize("title,location,expected",[
+    ("IT Support Specialist","Toronto, Ontario Hybrid",("Ontario","Hybrid")),
+    ("Product Support Analyst","Kitchener, Ontario; Remote",("Ontario","Remote")),
+    ("IT System Administrator","Toronto, ON",("Ontario","Unspecified")),
+    ("Service Desk Analyst","Remote Canada",("Remote Canada","Remote")),
+])
+def test_target_job_scope_includes_requested_roles_and_regions(title,location,expected):
+    scope=target_job_scope(title,location)
+    assert scope is not None
+    assert (scope["province"],scope["work_mode"])==expected
+
+
+@pytest.mark.parametrize("title,location",[
+    ("Senior IT Support Specialist","Toronto, Ontario"),
+    ("IT Support Manager","Toronto, Ontario"),
+    ("Software Engineer","Toronto, Ontario"),
+    ("Service Desk Analyst","Austin, Texas"),
+    ("Technical Support Specialist","Remote United States"),
+])
+def test_target_job_scope_excludes_senior_unrelated_and_out_of_region(title,location):
+    assert target_job_scope(title,location) is None
 
 
 def test_provider_rejects_arbitrary_hosts_and_malformed_board_identifiers():

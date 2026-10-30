@@ -24,6 +24,7 @@ class PublicBoard:
     name: str
     host: str
     slug: str
+    company_name: str | None = None
 
     def url(self) -> str:
         if not SLUG.fullmatch(self.slug):
@@ -84,6 +85,9 @@ class PublicATSProvider:
             external_id = str(item.get("id", "")) or None
             title = item.get("title", "")
             description = _plain(item.get("content"))
+            work_mode = None
+            employment_type = None
+            salary = None
         else:
             categories = item.get("categories") or {}
             location = categories.get("location") or ", ".join(categories.get("allLocations") or []) or "Unspecified"
@@ -91,15 +95,21 @@ class PublicATSProvider:
             external_id = str(item.get("id", "")) or None
             title = item.get("text", "")
             description = _plain(item.get("descriptionPlain") or item.get("description"))
+            work_mode = (item.get("workplaceType") or "").replace("on-site", "On-site").replace("hybrid", "Hybrid").replace("remote", "Remote") or None
+            employment_type = (item.get("categories") or {}).get("commitment")
+            salary = item.get("salaryRange")
         if not isinstance(url,str) or not url.startswith("https://"):
             raise ValueError("provider returned a non-HTTPS posting URL")
         return {
-            "company": self.board.slug,
+            "company": self.board.company_name or self.board.slug,
             "title": _plain(str(title), 300),
             "url": url[:2000],
             "source": self.board.name,
             "description": description,
             "location": _plain(str(location),300),
             "external_id": external_id,
+            "work_mode": work_mode,
+            "employment_type": employment_type,
+            "salary": salary,
             "untrusted": True,
         }

@@ -6,13 +6,19 @@ import re
 
 SKILL_ALIASES = {
     "active directory": ("active directory", "ad ds"),
+    "windows": ("windows", "windows server"),
+    "microsoft 365": ("microsoft 365", "office 365", "m365"),
+    "endpoint administration": ("intune", "endpoint administration", "endpoint management", "device management"),
     "linux": ("linux", "ubuntu", "debian", "centos"),
     "docker": ("docker", "containerized", "containers"),
-    "networking": ("tcp/ip", "dns", "dhcp", "vpn", "vlan"),
+    "networking": ("network troubleshooting", "tcp/ip", "wifi", "wi-fi", "dns", "dhcp", "vpn", "vlan"),
     "cloud": ("azure", "aws", "cloudflare"),
     "monitoring": ("monitoring", "uptime kuma", "netdata", "better stack"),
-    "support": ("technical support", "help desk", "troubleshooting", "desktop support"),
+    "support": ("technical support", "help desk", "service desk", "troubleshooting", "desktop support"),
+    "hardware": ("hardware support", "hardware troubleshooting", "device deployment", "computer hardware"),
+    "virtualization": ("proxmox", "vmware", "hyper-v", "virtualization"),
     "automation": ("powershell", "bash", "terraform", "automation"),
+    "backup and recovery": ("backup", "recovery", "disaster recovery", "restore"),
 }
 HARD_BLOCKERS = {
     "security_clearance": "Required security clearance is not confirmed.",
@@ -91,7 +97,7 @@ def score_job(description: str, verified_skills: set[str], *, requirements: list
     if hard:
         score = min(score, 24)
     evidence_ratio = len(explicit) / len(fit_inputs)
-    confidence = min(0.95, 0.35 + 0.08 * len(required) + 0.2 * evidence_ratio) if description else 0.2
+    confidence = min(0.95, 0.35 + 0.08 * min(5, len(required)) + 0.3 * evidence_ratio) if description else 0.2
     recommendation = "BLOCKED" if hard else "REVIEW" if score >= 50 else "SKIP"
     reasons = [f"{len(matched)} of {len(required)} configured skill groups have verified evidence"]
     if seniority_fit is False:

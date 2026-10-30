@@ -133,8 +133,14 @@ async def jobs(_: Principal = Depends(_owner)):
         return {"items": DEMO_JOBS}
     with db.connection() as conn:
         rows = conn.execute("""SELECT j.id::text,j.company,j.title,j.city,j.province,j.work_mode,j.lifecycle,
-          m.score,m.confidence,m.matched,m.missing,m.hard_blockers,m.recommended_action,
-          j.canonical_url,j.discovered_at FROM job j LEFT JOIN job_match m ON m.job_id=j.id
+          COALESCE(j.requirements->>'category','Uncategorized') AS category,
+          COALESCE(m.score,0)::int AS score,COALESCE(m.confidence,0)::float AS confidence,
+          COALESCE(m.matched,'[]'::jsonb) AS matched,COALESCE(m.missing,'[]'::jsonb) AS missing,
+          COALESCE(m.hard_blockers,'[]'::jsonb) AS blockers,
+          COALESCE(m.recommended_action,'REVIEW') AS action,
+          s.name AS source,j.posted_at AS posted,j.canonical_url AS url,j.discovered_at
+          FROM job j LEFT JOIN job_source s ON s.id=j.source_id
+          LEFT JOIN job_match m ON m.job_id=j.id
           ORDER BY j.discovered_at DESC LIMIT 200""").fetchall()
     return {"items": rows}
 
@@ -541,6 +547,7 @@ class JobImport(BaseModel):
 class PublicATSConfiguration(BaseModel):
     provider: Literal["greenhouse", "lever"]
     board_slug: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+    company_name: str | None = Field(default=None, min_length=1, max_length=120)
     terms_reviewed: bool
     enabled: bool = False
 
@@ -567,7 +574,8 @@ async def configure_public_ats(payload: PublicATSConfiguration, principal: Princ
               VALUES (%s,%s,'API',true,now(),%s,%s)
               ON CONFLICT(name) DO UPDATE SET source_type='API',permitted=true,terms_reviewed_at=now(),
                 enabled=excluded.enabled,configuration=excluded.configuration RETURNING id,enabled""",
-              (identity,source_name,payload.enabled,Jsonb({"provider":payload.provider,"board_slug":payload.board_slug}))).fetchone()
+              (identity,source_name,payload.enabled,Jsonb({"provider":payload.provider,"board_slug":payload.board_slug,
+                "company_name":payload.company_name}))).fetchone()
             conn.execute("""INSERT INTO audit_event(id,actor,action,object_type,object_id,request_id,result,metadata)
               VALUES (%s,%s,'PUBLIC_ATS_SOURCE_CONFIGURED','job_source',%s,%s,%s,%s)""",
               (uuid4(),principal.email,row["id"],uuid4(),"ENABLED" if row["enabled"] else "DISABLED",
