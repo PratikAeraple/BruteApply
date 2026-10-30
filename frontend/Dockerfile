@@ -6,6 +6,8 @@ RUN npm ci
 FROM node:24.22.2-trixie@sha256:8c761eca2bf7eec965f946cf47b8090143cb41f45f2f8699af0cc0298d2d2d19 AS builder
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
+ARG NEXT_PUBLIC_APP_MODE=demo
+ENV NEXT_PUBLIC_APP_MODE=${NEXT_PUBLIC_APP_MODE}
 COPY --from=dependencies /app/node_modules ./node_modules
 COPY . .
 RUN npm run build

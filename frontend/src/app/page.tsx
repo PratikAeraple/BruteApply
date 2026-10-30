@@ -9,7 +9,7 @@ type ApplicationRow = { id?:string; company:string; title:string; stage:string; 
 type NavItem = { id:string; label:string; icon:string; count?:string };
 
 const nav:NavItem[] = [
-  {id:"overview",label:"Overview",icon:"◫"},{id:"jobs",label:"Job explorer",icon:"⌕",count:"18"},
+  {id:"overview",label:"Overview",icon:"◫"},{id:"jobs",label:"Job explorer",icon:"⌕"},
   {id:"pipeline",label:"Applications",icon:"▤"},{id:"tickets",label:"Tickets & decisions",icon:"◇",count:"2"},
   {id:"profile",label:"My profile",icon:"○"},{id:"resumes",label:"Resume manager",icon:"▱"},
   {id:"integrations",label:"Integrations",icon:"⤴"},{id:"analytics",label:"Analytics",icon:"⌁"},
@@ -36,6 +36,8 @@ const demoApplications = [
 ];
 
 const defaultOverview:Overview = {mode:"DEMO",counts:{discovered:18,qualified:7,shortlisted:3,prepared:2,submitted:0,unverified:0,tickets:2,interviews:0,offers:0},workers:{discovery:"PAUSED",matching:"READY",documents:"READY",submission:"DISABLED",sheet_sync:"NOT CONNECTED",email:"NOT CONNECTED"},integrations:{google_sheets:"NOT CONFIGURED",email:"NOT CONFIGURED",ai:"FAKE PROVIDER"},backup:{status:"DEFERRED / NOT IMPLEMENTED",restore_test:"NOT TESTED"},components:{database:"SYNTHETIC",queue:"SYNTHETIC",worker:"NOT RUNNING"}};
+const demoBuild = process.env.NEXT_PUBLIC_APP_MODE !== "production";
+const productionOverview:Overview = {mode:"PRODUCTION",counts:{discovered:0,qualified:0,shortlisted:0,prepared:0,submitted:0,unverified:0,tickets:0,interviews:0,offers:0},workers:{discovery:"PAUSED",matching:"PAUSED",documents:"PAUSED",submission:"EMERGENCY STOP",sheet_sync:"NOT CONFIGURED",email:"NOT CONFIGURED"},integrations:{google_sheets:"NOT CONFIGURED",email:"NOT CONFIGURED",ai:"NOT CONFIGURED"},backup:{status:"DEFERRED / NOT IMPLEMENTED",restore_test:"NOT TESTED"},components:{database:"UNKNOWN",queue:"UNKNOWN",worker:"UNKNOWN"}};
 
 function Badge({children,tone="neutral"}:{children:React.ReactNode;tone?:string}) { return <span className={`badge badge-${tone}`}>{children}</span>; }
 function Mark({children}:{children:React.ReactNode}) { return <span className="mark" aria-hidden="true">{children}</span>; }
@@ -47,20 +49,21 @@ export default function Home() {
   const [dark,setDark] = useState(true);
   const [search,setSearch] = useState("");
   const [province,setProvince] = useState("All provinces");
-  const [jobs,setJobs] = useState<Job[]>(demoJobs);
-  const [tickets,setTickets] = useState<Ticket[]>(demoTickets);
-  const [applications,setApplications] = useState<ApplicationRow[]>(demoApplications);
-  const [overview,setOverview] = useState<Overview>(defaultOverview);
-  const [shortlisted,setShortlisted] = useState<Set<string>>(new Set(["demo-job-01","demo-job-02"]));
+  const [jobs,setJobs] = useState<Job[]>(demoBuild?demoJobs:[]);
+  const [tickets,setTickets] = useState<Ticket[]>(demoBuild?demoTickets:[]);
+  const [applications,setApplications] = useState<ApplicationRow[]>(demoBuild?demoApplications:[]);
+  const [overview,setOverview] = useState<Overview>(demoBuild?defaultOverview:productionOverview);
+  const [shortlisted,setShortlisted] = useState<Set<string>>(demoBuild?new Set(["demo-job-01","demo-job-02"]):new Set());
   const [resolved,setResolved] = useState<Set<string>>(new Set());
-  const [workerStates,setWorkerStates] = useState<Record<string,string>>(defaultOverview.workers);
+  const [workerStates,setWorkerStates] = useState<Record<string,string>>(demoBuild?defaultOverview.workers:productionOverview.workers);
+  const [apiUnavailable,setApiUnavailable] = useState(!demoBuild);
   const [toast,setToast] = useState("");
 
   useEffect(()=>{
     Promise.all([
       fetch("/api/v1/overview",{cache:"no-store"}),fetch("/api/v1/jobs",{cache:"no-store"}),fetch("/api/v1/tickets",{cache:"no-store"}),fetch("/api/v1/applications",{cache:"no-store"}),
     ]).then(async ([o,j,t,a])=>{
-      if(!o.ok||!j.ok||!t.ok||!a.ok) return;
+      if(!o.ok||!j.ok||!t.ok||!a.ok) { if(!demoBuild) setApiUnavailable(true); return; }
       const [ov,jv,tv,av]=await Promise.all([o.json(),j.json(),t.json(),a.json()]);
       if(ov.mode==="PRODUCTION") {
         setOverview(ov);setJobs(jv.items||[]);setTickets(tv.items||[]);
@@ -70,8 +73,9 @@ export default function Home() {
           score:Number(item.score||0),id:String(item.id),
         })));
         setWorkerStates(ov.workers||{});
+        setApiUnavailable(false);
       }
-    }).catch(()=>{});
+    }).catch(()=>{ if(!demoBuild) setApiUnavailable(true); });
   },[]);
 
   useEffect(()=>{document.documentElement.dataset.theme=dark?"dark":"light";try{localStorage.setItem("bruteapply-theme",dark?"dark":"light")}catch{}},[dark]);
@@ -122,6 +126,7 @@ export default function Home() {
     <main className="main-area">
       <header className="topbar"><div className="breadcrumb"><span>Workspace</span><span className="slash">/</span><strong>{nav.find(n=>n.id===active)?.label||"Overview"}</strong></div><div className="top-actions"><Badge tone={overview.mode==="DEMO"?"amber":"green"}>{overview.mode==="DEMO"?"DEMO DATA":"PRIVATE SESSION"}</Badge><button className="icon-button" aria-label="Toggle light and dark appearance" onClick={()=>setDark(!dark)}>{dark?"☼":"◐"}</button><button className="notification-button" aria-label={`${openTickets.length} open tickets`} onClick={()=>select("tickets")}>♧<i>{openTickets.length}</i></button><span className="avatar avatar-small">PA</span></div></header>
       <div className="content">
+        {apiUnavailable&&!demoBuild&&<div className="notice notice-demo" role="status"><span className="notice-mark">ⓘ</span><div><strong>Private data is unavailable</strong><p>The application API has not returned a complete live response. No sample jobs, tickets or applications are shown.</p></div></div>}
         {active==="overview"&&<OverviewPage overview={overview} jobs={jobs} tickets={openTickets} workers={workerStates} shortlist={shortlisted} onSelect={select} onOpenJob={()=>select("jobs")} />}
         {active==="jobs"&&<JobsPage jobs={filteredJobs} total={jobs.length} search={search} province={province} setSearch={setSearch} setProvince={setProvince} shortlisted={shortlisted} toggleShortlist={toggleShortlist} notify={notify} />}
         {active==="pipeline"&&<PipelinePage applications={applications} notify={notify} />}

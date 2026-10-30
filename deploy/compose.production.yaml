@@ -5,6 +5,9 @@ name: bruteapply
 services:
   db:
     image: postgres:17.11-trixie@sha256:31ba9c94a03ada9988f2bb493a22a75eef3a185884533e5cdbcd498ea835b08f
+    # Match the pinned official image's postgres UID/GID so the process does
+    # not need root or retained capabilities to initialize its named volume.
+    user: "999:999"
     environment:
       POSTGRES_DB: bruteapply
       POSTGRES_USER: bruteapply
@@ -32,6 +35,9 @@ services:
 
   redis:
     image: redis:8.4.8-trixie@sha256:8966e8ff525ef9e3f3ea476cb15db868a41a701f5188c77c138e3ce613c2d81a
+    # The pinned image's redis account owns the named volume; run it directly
+    # as that account so no root entrypoint capability is needed.
+    user: "999:999"
     command: [redis-server, --appendonly, "yes", --save, "60", "1000", --appendfsync, everysec, --maxmemory, 256mb, --maxmemory-policy, noeviction]
     volumes: [redis_data:/data]
     networks: [data]
@@ -121,7 +127,7 @@ services:
     build:
       context: ../backend
       dockerfile: Dockerfile
-    command: [celery, -A, app.tasks.celery_app, worker, --loglevel=INFO, --concurrency=2]
+    command: [celery, -A, app.tasks.celery_app, worker, --loglevel=INFO, --concurrency=2, --hostname=worker@%h]
     environment:
       <<: *application_environment
     secrets: [database_url, document_encryption_key]
@@ -144,6 +150,12 @@ services:
     restart: unless-stopped
     mem_limit: 768m
     cpus: 1.0
+    healthcheck:
+      test: [CMD-SHELL, 'celery -A app.tasks.celery_app inspect ping --destination="worker@$$HOSTNAME" --timeout=3 2>/dev/null | grep -q pong']
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 30s
 
   scheduler:
     image: bruteapply-api:${BRUTEAPPLY_REVISION:?set full immutable source revision}
@@ -168,6 +180,12 @@ services:
     restart: unless-stopped
     mem_limit: 192m
     cpus: 0.25
+    healthcheck:
+      test: [CMD-SHELL, "python -c 'from pathlib import Path; c=Path(\"/proc/1/task/1/children\").read_text().split(); assert any(b\"celery\" in (d:=Path(f\"/proc/{p}/cmdline\").read_bytes()) and b\"beat\" in d for p in c)' "]
+      interval: 30s
+      timeout: 4s
+      retries: 3
+      start_period: 20s
 
   private-resume-bootstrap:
     profiles: [bootstrap]
@@ -212,6 +230,8 @@ services:
     build:
       context: ../frontend
       dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_APP_MODE: production
     environment:
       API_INTERNAL_URL: http://api:8000
       NEXT_TELEMETRY_DISABLED: "1"
