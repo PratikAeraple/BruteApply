@@ -1305,7 +1305,7 @@ async def download_private_document(document_id: UUID, principal: Principal = De
     if config.DEMO_MODE: raise HTTPException(404,"document not found")
     from .storage import decrypt_document
     with db.connection() as conn:
-        row=conn.execute("SELECT sha256,mime_type,size_bytes,storage_key FROM document WHERE id=%s AND encrypted",
+        row=conn.execute("SELECT document_type,sha256,mime_type,size_bytes,storage_key FROM document WHERE id=%s AND encrypted",
                          (document_id,)).fetchone()
     if not row: raise HTTPException(404,"document not found")
     formats={"text/plain":("txt","txt"),"application/pdf":("pdf","pdf"),
