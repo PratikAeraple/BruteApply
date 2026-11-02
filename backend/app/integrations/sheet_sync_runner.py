@@ -303,13 +303,8 @@ def run_sync(task_id:str, *, api:GoogleOAuthREST|None=None, max_records:int|None
             url=row[13] if len(row)>13 else None
             if url not in (None,""):by_url.setdefault(str(url).strip(),[]).append(i)
         if max_records is not None:
-            # Prefer an eligible row without an open conflict so the bounded
-            # first-write probe can establish a clean mapping. Legacy rows
-            # with discrepancies remain queued for explicit conflict review.
-            open_conflicts={r["application_id"] for r in conn.execute(
-              "SELECT DISTINCT application_id FROM sheet_sync_conflict WHERE state='OPEN'").fetchall()}
-            records.sort(key=lambda r:r["application_id"] in open_conflicts)
-            records.sort(key=lambda r:bool(by_url.get(r["canonical_url"])))
+            # Preserve the deterministic match ordering for bounded runs so an
+            # immediate repeat exercises the same leading application.
             records=records[:max_records]
         for record in records:
             app_id=record["application_id"]
@@ -415,6 +410,16 @@ def run_sync(task_id:str, *, api:GoogleOAuthREST|None=None, max_records:int|None
                     cell_range=f"'Applications'!{_col(idx+1)}{row_num}"
                     sheet_updates.append({"range":cell_range,"values":[[value]]})
                     allowed_changes.add((row_num-1,idx))
+                    written_rows.add(row_num)
+            if not mapping and not is_new and str(sheet_row[13]).strip()==record["canonical_url"]:
+                # A sparse RAW write of the already-verified canonical URL is
+                # a harmless first-association write probe. It cannot alter a
+                # row's content, and proves the production write path before
+                # reconciliation proceeds to the other existing rows.
+                cell_range=f"'Applications'!N{row_num}"
+                if not any(update["range"]==cell_range for update in sheet_updates):
+                    sheet_updates.append({"range":cell_range,"values":[[record["canonical_url"]]]})
+                    allowed_changes.add((row_num-1,13))
                     written_rows.add(row_num)
             plans.append((record,row_num,metadata_id,owner,sheet_row,db_row,status_target,is_new))
         if metadata_add:
