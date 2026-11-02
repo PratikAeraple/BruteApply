@@ -5,7 +5,7 @@ import pytest
 
 from app.domain.sheet_sync import APPLICATION_HEADERS, FORMULA_COLUMNS
 from app.integrations.sheet_sync_runner import (
-    _db_row, _find_preformatted_row, _legacy_date_mismatch, _safe_system_timestamp_refresh, _map_status, _metadata_row,
+    _db_row, _find_preformatted_row, _legacy_date_mismatch, _safe_system_timestamp_refresh, _is_timestamp_only_conflict, _map_status, _metadata_row,
     _owner_fields, _restore_written_cell_formats, _verify_preservation,
 )
 
@@ -107,6 +107,10 @@ def test_only_bounded_forward_timezone_aware_system_timestamp_is_auto_refreshabl
     assert not _safe_system_timestamp_refresh("owner edit","2026-11-02T21:21:55+00:00")
     assert not _safe_system_timestamp_refresh("2026-11-01T21:21:42+00:00",
                                                "2026-11-02T21:21:55+00:00")
+    assert _is_timestamp_only_conflict(["Last Status Update"],"2026-11-02T21:21:42+00:00",
+                                       "2026-11-02T21:21:55+00:00")
+    assert not _is_timestamp_only_conflict(["Status","Last Status Update"],"2026-11-02T21:21:42+00:00",
+                                           "2026-11-02T21:21:55+00:00")
 
 
 def test_multiple_new_rows_and_metadata_identity_remain_distinct():

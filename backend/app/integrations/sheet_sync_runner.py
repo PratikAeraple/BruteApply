@@ -342,6 +342,10 @@ def _safe_system_timestamp_refresh(sheet_value:Any,database_value:Any)->bool:
         return False
 
 
+def _is_timestamp_only_conflict(fields:Any,sheet_value:Any,database_value:Any)->bool:
+    return set(fields or [])=={"Last Status Update"} and _safe_system_timestamp_refresh(sheet_value,database_value)
+
+
 def run_sync(task_id:str, *, api:GoogleOAuthREST|None=None, max_records:int|None=None) -> dict[str,int]:
     if not SPREADSHEET_ID or len(SPREADSHEET_ID)>200:
         raise RuntimeError("Google Sheets tracker is not configured")
@@ -415,12 +419,22 @@ def run_sync(task_id:str, *, api:GoogleOAuthREST|None=None, max_records:int|None
             # an exact-URL legacy row, and record the exception encrypted.
             existing_open=conn.execute("SELECT id,fields FROM sheet_sync_conflict WHERE application_id=%s AND sheet_id=%s AND state='OPEN' ORDER BY created_at LIMIT 1",(app_id,SPREADSHEET_ID)).fetchone()
             legacy_date_audited=False
+            timestamp_conflict_audited=False
             if existing_open:
                 fields=set(existing_open["fields"] or [])
                 if fields=={"Date Found"} and not mapping:
                     conn.execute("UPDATE sheet_sync_conflict SET state='RESOLVED',resolution='LEGACY_SHEET_VALUE_PRESERVED',resolved_at=now() WHERE id=%s",(existing_open["id"],))
                     preserved.add(1)
                     legacy_date_audited=True
+                elif _is_timestamp_only_conflict(fields,sheet_row[17],db_row[17]):
+                    # A prior run may have recorded this system-owned timestamp
+                    # before applying the safe refresh. Re-evaluate against the
+                    # live row and canonical database event before unblocking it.
+                    conn.execute("UPDATE sheet_sync_conflict SET state='RESOLVED',resolution='SYSTEM_OWNED_TIMESTAMP_REFRESH',resolved_at=now() WHERE id=%s",(existing_open["id"],))
+                    conn.execute("""INSERT INTO audit_event(id,actor,action,object_type,object_id,request_id,result,metadata)
+                      VALUES (%s,'sheet-sync','SHEET_SYSTEM_FIELD_REFRESHED','application',%s,%s,'DATABASE_VALUE_APPLIED',%s)""",
+                      (uuid4(),app_id,uuid4(),Jsonb({"field":"Last Status Update","policy":"SYSTEM_OWNED","rechecked":True})))
+                    timestamp_conflict_audited=True
                 else:
                     conflicts+=1;continue
             baseline=None
@@ -457,7 +471,7 @@ def run_sync(task_id:str, *, api:GoogleOAuthREST|None=None, max_records:int|None
                 # application event is a stale projection, not an owner edit.
                 # Resolve only this field and only when both values parse as
                 # timezone-aware/UTC instants; other mismatches stay conflicts.
-                if remote_conflicts == [17] and _safe_system_timestamp_refresh(sheet_row[17],db_row[17]):
+                if remote_conflicts == [17] and not timestamp_conflict_audited and _safe_system_timestamp_refresh(sheet_row[17],db_row[17]):
                     _make_conflict(conn,record,row_num,["Last Status Update"],
                       {"Last Status Update":sheet_row[17]},{"Last Status Update":db_row[17]},key)
                     conn.execute("""UPDATE sheet_sync_conflict SET state='RESOLVED',
