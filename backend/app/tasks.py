@@ -274,6 +274,10 @@ def sync_google_sheet(self, max_records: int | None = None):
         try:
             with db.connection() as conn:
                 with conn.transaction():
+                    integration=conn.execute("""INSERT INTO integration(id,provider,state,credential_reference,scopes,last_error_category)
+                      VALUES (%s,'google_sheets','ERROR','/run/secrets/google_oauth',%s,%s)
+                      ON CONFLICT(provider) DO UPDATE SET state='ERROR',last_error_category=EXCLUDED.last_error_category,updated_at=now()
+                      RETURNING id""",(uuid4(),Jsonb(["spreadsheets"]),category)).fetchone()
                     terminal=self.request.retries>=self.max_retries
                     conn.execute("""INSERT INTO worker_job(id,idempotency_key,task_name,state,attempts,started_at,
                       completed_at,error_category) VALUES (%s,%s,'google_sheet_sync',%s,%s,now(),
@@ -282,9 +286,11 @@ def sync_google_sheet(self, max_records: int | None = None):
                       completed_at=EXCLUDED.completed_at,error_category=EXCLUDED.error_category""",
                       (uuid4(),f"google-sheet:{task_id}","DEAD_LETTER" if terminal else "RETRY",
                        self.request.retries+1,terminal,category))
-                    conn.execute("""UPDATE sync_state SET last_attempt_at=now(),retry_count=%s,
-                      dead_letter_count=dead_letter_count+%s,error_category=%s WHERE resource='APPLICATIONS'""",
-                      (self.request.retries+1,1 if terminal else 0,category))
+                    conn.execute("""INSERT INTO sync_state(id,integration_id,resource,last_attempt_at,retry_count,dead_letter_count,error_category)
+                      VALUES (%s,%s,'APPLICATIONS',now(),%s,%s,%s)
+                      ON CONFLICT(integration_id,resource) DO UPDATE SET last_attempt_at=now(),retry_count=EXCLUDED.retry_count,
+                      dead_letter_count=sync_state.dead_letter_count+EXCLUDED.dead_letter_count,error_category=EXCLUDED.error_category""",
+                      (uuid4(),integration["id"],self.request.retries+1,1 if terminal else 0,category))
                     conn.execute("UPDATE integration SET state='ERROR',last_error_category=%s,updated_at=now() WHERE provider='google_sheets'",(category,))
         except Exception:
             pass

@@ -290,13 +290,18 @@ def run_sync(task_id:str, *, api:GoogleOAuthREST|None=None, max_records:int|None
         records=_records(conn)
         if max_records is not None:
             if not 1<=max_records<=50: raise ValueError("sync record bound is invalid")
-            records=records[:max_records]
         conflicts=created=updated=0
         sheet_updates=[];metadata_add=[];plans=[];allowed_changes=set();written_rows=set()
         by_url={}
         for i,row in enumerate(rows,start=2):
             url=row[13] if len(row)>13 else None
             if url not in (None,""):by_url.setdefault(str(url).strip(),[]).append(i)
+        if max_records is not None:
+            # The controlled first write should select an untracked eligible
+            # job when one exists, leaving legacy rows for conflict-aware
+            # association without risking an owner-history overwrite.
+            records.sort(key=lambda r:bool(by_url.get(r["canonical_url"])))
+            records=records[:max_records]
         for record in records:
             app_id=record["application_id"]
             mapping=conn.execute("SELECT * FROM sheet_mapping WHERE application_id=%s",(app_id,)).fetchone()
