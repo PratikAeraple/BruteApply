@@ -69,6 +69,18 @@ def test_google_rest_requires_raw_value_writes_to_block_formula_injection(tmp_pa
     assert body["data"][0]["values"]==[["=IMPORTXML()"]]
 
 
+def test_google_rest_uses_documented_developer_metadata_search_route(tmp_path):
+    seen=[]
+    def handler(request):
+        if request.url.host=="oauth2.googleapis.com":
+            return httpx.Response(200,json={"access_token":"fake-access","expires_in":3600})
+        seen.append(request)
+        return httpx.Response(200,json={"matchedDeveloperMetadata":[]})
+    api=GoogleOAuthREST(str(_credential_file(tmp_path)),transport=httpx.MockTransport(handler))
+    assert api.search_developer_metadata(spreadsheet_id="sheet-id",key="uuid",value="app-id")==[]
+    assert seen[0].url.path.endswith("/developerMetadata:search")
+
+
 def test_oauth_client_requires_private_file_and_loopback_redirect(tmp_path):
     path=tmp_path/"oauth-client.json"
     path.write_text('{"installed":{"client_id":"demo.apps.googleusercontent.com",'

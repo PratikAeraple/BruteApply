@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+import logging
 import os
 from pathlib import Path
 import stat
@@ -24,6 +25,11 @@ GOOGLE_SCOPES = (
 OAUTH_HOST = "oauth2.googleapis.com"
 API_HOST = "sheets.googleapis.com"
 DRIVE_HOST = "www.googleapis.com"
+
+# httpx's default INFO request logger records full URLs, including the private
+# spreadsheet identifier. Keep OAuth and Sheets request URLs out of logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 class GoogleOAuthREST:
@@ -154,7 +160,7 @@ class GoogleOAuthREST:
     def search_developer_metadata(self, *, spreadsheet_id: str, key: str, value: str) -> list[dict[str,Any]]:
         if not spreadsheet_id or len(spreadsheet_id)>200 or not key or len(key)>100 or len(value)>200:
             raise ValueError("developer metadata lookup is invalid")
-        response=self._request("POST",f"https://{API_HOST}/v4/spreadsheets/{quote(spreadsheet_id,safe='')}:developerMetadata/search",
+        response=self._request("POST",f"https://{API_HOST}/v4/spreadsheets/{quote(spreadsheet_id,safe='')}/developerMetadata:search",
           json_body={"dataFilters":[{"developerMetadataLookup":{"metadataKey":key,"metadataValue":value,"visibility":"DOCUMENT"}}]},retries=1)
         matches=response.get("matchedDeveloperMetadata",[])
         if not isinstance(matches,list):
