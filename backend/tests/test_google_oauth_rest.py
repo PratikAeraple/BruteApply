@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from app.integrations.google_oauth_rest import GOOGLE_SCOPES, GoogleOAuthREST
 from scripts.google_oauth_local import (_authorization_url, _default_output_path,
-    _read_client, _validate_granted_scopes, _exchange)
+    _read_client, _validate_granted_scopes, _verify_access_token_scopes, _exchange)
 
 
 def _credential_file(tmp_path: Path) -> Path:
@@ -113,29 +113,42 @@ def test_local_oauth_authorization_requests_only_sheets_scope():
 
 def test_local_oauth_scope_validation_rejects_broader_or_missing_grant():
     _validate_granted_scopes({"scope":GOOGLE_SCOPES[0]})
-    _validate_granted_scopes({}) # OAuth omits scope when it equals the request.
-    with pytest.raises(RuntimeError,match="unexpected scopes"):
+    with pytest.raises(RuntimeError,match="required Sheets scope"):
         _validate_granted_scopes({"scope":GOOGLE_SCOPES[0]+" https://www.googleapis.com/auth/drive.file"})
-    with pytest.raises(RuntimeError,match="unexpected scopes"):
+    with pytest.raises(RuntimeError,match="required Sheets scope"):
         _validate_granted_scopes({"scope":"https://www.googleapis.com/auth/drive.file"})
+    with pytest.raises(RuntimeError,match="required Sheets scope"):
+        _validate_granted_scopes({})
 
 
 def test_local_oauth_exchange_scope_validation_is_mocked_and_private():
     def handler(request):
         assert request.url.host=="oauth2.googleapis.com"
-        assert "client_secret=secret" not in request.url.query.decode()
-        return httpx.Response(200,json={"refresh_token":"fake-refresh",
-          "scope":"https://www.googleapis.com/auth/spreadsheets"})
+        if request.url.path=="/token":
+            assert "client_secret=secret" not in request.url.query.decode()
+            return httpx.Response(200,json={"refresh_token":"fake-refresh","access_token":"fake-access"})
+        assert request.url.path=="/tokeninfo"
+        assert "fake-access" not in request.url.query.decode()
+        assert b"fake-access" in request.content
+        return httpx.Response(200,json={"scope":"https://www.googleapis.com/auth/spreadsheets"})
     assert _exchange("fake-code","verifier","client-id","secret",
       transport=httpx.MockTransport(handler))=="fake-refresh"
 
 
 def test_local_oauth_exchange_does_not_accept_unexpected_scope():
-    def handler(_):
-        return httpx.Response(200,json={"refresh_token":"fake-refresh",
-          "scope":"https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file"})
-    with pytest.raises(RuntimeError,match="unexpected scopes"):
+    def handler(request):
+        if request.url.path=="/token":
+            return httpx.Response(200,json={"refresh_token":"fake-refresh","access_token":"fake-access"})
+        return httpx.Response(200,json={"scope":"https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file"})
+    with pytest.raises(RuntimeError,match="required Sheets scope") as exc:
         _exchange("fake-code","verifier","client-id","secret",transport=httpx.MockTransport(handler))
+    assert "fake-access" not in str(exc.value)
+
+
+def test_token_scope_verification_rejects_missing_actual_grant():
+    with pytest.raises(RuntimeError,match="required Sheets scope"):
+        _verify_access_token_scopes("fake-access",transport=httpx.MockTransport(
+            lambda _:httpx.Response(200,json={})))
 
 
 def test_oauth_client_requires_private_file_and_loopback_redirect(tmp_path):

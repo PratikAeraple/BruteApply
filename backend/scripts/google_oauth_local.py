@@ -42,13 +42,30 @@ def _authorization_url(client_id: str, state: str, challenge: str) -> str:
 
 
 def _validate_granted_scopes(payload: dict) -> None:
-    # Google may omit `scope` when the granted scopes exactly match the request.
-    # If supplied, reject any broader grant before the refresh token is persisted.
     granted=payload.get("scope")
-    if granted is None:
-        return
     if not isinstance(granted,str) or set(granted.split())!=set(GOOGLE_SCOPES):
-        raise RuntimeError("Google authorization granted unexpected scopes; no credential was saved")
+        raise RuntimeError("Google token did not have exactly the required Sheets scope; no credential was saved")
+
+
+def _verify_access_token_scopes(access_token: str, *,
+                                transport: httpx.BaseTransport | None = None) -> None:
+    # The token endpoint can omit `scope`; inspect the actual access token so an
+    # older grant on the same OAuth client cannot silently broaden this output.
+    if not isinstance(access_token,str) or not access_token:
+        raise RuntimeError("Google did not return an access token; no credential was saved")
+    try:
+        with httpx.Client(timeout=httpx.Timeout(15,connect=5),follow_redirects=False,
+                          transport=transport) as client:
+            response=client.post(f"https://{OAUTH_HOST}/tokeninfo",data={"access_token":access_token})
+            if response.url.scheme!="https" or response.url.host!=OAUTH_HOST:
+                raise RuntimeError("Google token verification origin validation failed")
+            response.raise_for_status()
+            payload=response.json()
+        _validate_granted_scopes(payload)
+    except RuntimeError:
+        raise
+    except Exception:
+        raise RuntimeError("Google token scope verification failed; no credential was saved") from None
 
 
 class CallbackHandler(BaseHTTPRequestHandler):
@@ -105,7 +122,7 @@ def _exchange(code: str, verifier: str, client_id: str, client_secret: str, *,
                 raise RuntimeError("Google token endpoint origin validation failed")
             response.raise_for_status()
             payload=response.json()
-        _validate_granted_scopes(payload)
+        _verify_access_token_scopes(payload.get("access_token"),transport=transport)
         refresh=payload.get("refresh_token")
         if not isinstance(refresh,str) or not refresh:
             raise RuntimeError("Google did not issue offline authorization; no credential was saved")
