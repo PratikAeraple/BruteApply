@@ -14,8 +14,24 @@ Owner-editable values are encrypted in `sheet_owner_state` and returned only thr
 
 The worker uses bounded exponential retries, records dead letters without provider response bodies or candidate values, and serializes sync through a PostgreSQL advisory lock. A conservative four-hour schedule is active only after the controlled production sync succeeds and the `sheet_sync` agent remains enabled and unpaused.
 
-The OAuth consent screen is External / Testing. Google may expire refresh tokens after seven days in that state for non-basic scopes. In Google Cloud Console, open **Google Auth Platform → Audience**, change **Publishing status** from **Testing** to **In production**, and save. Monitor token refresh afterward. If Google rejects the existing refresh token, run the owner-attended OAuth flow again and replace the credential through the protected BruteHost provisioning process. Never share OAuth values in chat.
+## OAuth scope and credential rotation
+
+The connector requires only `https://www.googleapis.com/auth/spreadsheets`. Its reads, sparse value writes, spreadsheet metadata reads, and developer-metadata lookup/update operations all use the Sheets API. Pre-write snapshots are encrypted locally in BruteApply's private documents storage; the production sync does not copy spreadsheets through Drive. The broader `drive.file` grant is not requested by the current connector. The Sheets scope is sensitive and grants access to the user's spreadsheets; it is not limited to the one configured tracker.
+
+The Google OAuth consent screen is owner-confirmed **External / In production**. The source and Compose defaults now match that status; the previous Testing defaults were stale. This publishing status avoids the seven-day refresh-token expiration rule that applies to External / Testing projects with scopes beyond basic identity. Still monitor token refresh and consent health.
+
+The local owner-attended PKCE bootstrap requests Sheets only and disables incremental scope accumulation so the prior Drive grant is not carried into this credential. Its default output is `~/.local/state/bruteapply/google-oauth-sheets-only.json`, separate from the existing `google-oauth.json`, and it refuses to overwrite any existing output. If Google's token response includes a granted-scope list, the script verifies it contains exactly the requested Sheets scope before saving. The credential remains owner-controlled until deliberately transferred through the protected provisioning process.
+
+Preparing this narrower credential does **not** rotate or replace production credentials. The currently working production OAuth file, the dedicated `sheets-worker`, scheduled sync, spreadsheet rows, formulas, formatting, validation, dropdowns, and mapping remain unchanged. A later activation is a separate attended operation: stage the new credential privately, validate refresh and tracker access with it, then perform a controlled worker credential swap and post-swap sync check. Never revoke the old grant until the replacement is proven functional. Never share OAuth values in chat or Git.
 
 ## Initial authorization bootstrap
 
-The owner-attended loopback bootstrap is `backend/scripts/google_oauth_local.py`; it uses PKCE and does not print authorization codes or tokens. Provision its output only through the protected runtime-secret process. Never place OAuth state in this repository.
+The owner-attended loopback bootstrap is `backend/scripts/google_oauth_local.py`; it uses PKCE and does not print authorization codes or tokens. Provision its output only through the protected runtime-secret process. Never place OAuth state in this repository. To create a separate Sheets-only credential on a Mac with a local BruteApply clone at `~/BruteApply` and the downloaded OAuth client file at `~/Downloads/google-oauth-client.json`, run:
+
+```sh
+cd "$HOME/BruteApply" && python3 backend/scripts/google_oauth_local.py \
+  --oauth-client-file "$HOME/Downloads/google-oauth-client.json" \
+  --output "$HOME/.local/state/bruteapply/google-oauth-sheets-only.json"
+```
+
+If the clone or downloaded client has a different location, change only that path. The command opens Google's consent page in the local browser and writes the new credential at the separate output path with mode `0600`; it does not alter BruteHost production.

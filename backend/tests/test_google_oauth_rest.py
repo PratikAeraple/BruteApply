@@ -3,9 +3,11 @@ import json
 
 import httpx
 import pytest
+from urllib.parse import parse_qs, urlsplit
 
-from app.integrations.google_oauth_rest import GoogleOAuthREST
-from scripts.google_oauth_local import _read_client
+from app.integrations.google_oauth_rest import GOOGLE_SCOPES, GoogleOAuthREST
+from scripts.google_oauth_local import (_authorization_url, _default_output_path,
+    _read_client, _validate_granted_scopes, _exchange)
 
 
 def _credential_file(tmp_path: Path) -> Path:
@@ -79,6 +81,61 @@ def test_google_rest_uses_documented_developer_metadata_search_route(tmp_path):
     api=GoogleOAuthREST(str(_credential_file(tmp_path)),transport=httpx.MockTransport(handler))
     assert api.search_developer_metadata(spreadsheet_id="sheet-id",key="uuid",value="app-id")==[]
     assert seen[0].url.path.endswith("/developerMetadata:search")
+
+
+def test_oauth_scope_is_sheets_only_and_covers_developer_metadata():
+    assert GOOGLE_SCOPES==("https://www.googleapis.com/auth/spreadsheets",)
+
+
+def test_google_rest_refuses_non_sheets_origin_before_token_or_request(tmp_path):
+    calls=[]
+    api=GoogleOAuthREST(str(_credential_file(tmp_path)),transport=httpx.MockTransport(
+        lambda request:(calls.append(request),httpx.Response(200,json={"values":[]}))[1]))
+    with pytest.raises(RuntimeError,match="origin validation"):
+        api._request("GET","https://www.googleapis.com/drive/v3/files/file-id")
+    assert calls==[]
+
+
+def test_local_oauth_default_uses_separate_non_overwriting_output(tmp_path):
+    path=_default_output_path(tmp_path)
+    assert path.name=="google-oauth-sheets-only.json"
+    assert path!=tmp_path/".local/state/bruteapply/google-oauth.json"
+
+
+def test_local_oauth_authorization_requests_only_sheets_scope():
+    url=_authorization_url("client.apps.googleusercontent.com","state","challenge")
+    query=parse_qs(urlsplit(url).query)
+    assert query["scope"]==["https://www.googleapis.com/auth/spreadsheets"]
+    assert query["access_type"]==["offline"]
+    assert query["include_granted_scopes"]==["false"]
+    assert query["code_challenge_method"]==["S256"]
+
+
+def test_local_oauth_scope_validation_rejects_broader_or_missing_grant():
+    _validate_granted_scopes({"scope":GOOGLE_SCOPES[0]})
+    _validate_granted_scopes({}) # OAuth omits scope when it equals the request.
+    with pytest.raises(RuntimeError,match="unexpected scopes"):
+        _validate_granted_scopes({"scope":GOOGLE_SCOPES[0]+" https://www.googleapis.com/auth/drive.file"})
+    with pytest.raises(RuntimeError,match="unexpected scopes"):
+        _validate_granted_scopes({"scope":"https://www.googleapis.com/auth/drive.file"})
+
+
+def test_local_oauth_exchange_scope_validation_is_mocked_and_private():
+    def handler(request):
+        assert request.url.host=="oauth2.googleapis.com"
+        assert "client_secret=secret" not in request.url.query.decode()
+        return httpx.Response(200,json={"refresh_token":"fake-refresh",
+          "scope":"https://www.googleapis.com/auth/spreadsheets"})
+    assert _exchange("fake-code","verifier","client-id","secret",
+      transport=httpx.MockTransport(handler))=="fake-refresh"
+
+
+def test_local_oauth_exchange_does_not_accept_unexpected_scope():
+    def handler(_):
+        return httpx.Response(200,json={"refresh_token":"fake-refresh",
+          "scope":"https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file"})
+    with pytest.raises(RuntimeError,match="unexpected scopes"):
+        _exchange("fake-code","verifier","client-id","secret",transport=httpx.MockTransport(handler))
 
 
 def test_oauth_client_requires_private_file_and_loopback_redirect(tmp_path):

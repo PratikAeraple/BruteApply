@@ -22,7 +22,6 @@ dependencies = [
 [project.optional-dependencies]
 test = ["pytest==8.4.2", "httpx==0.28.1"]
 ai = ["openai==2.6.1"]
-google = ["google-api-python-client==2.187.0", "google-auth-oauthlib==1.2.2"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -168,7 +168,7 @@ async def overview(_: Principal = Depends(_owner)):
       "rows_updated":(sheet_last["payload"] or {}).get("rows_updated",0) if sheet_last else 0,
       "error_category":sheet_sync["error_category"] if sheet_sync else (sheet_integration["last_error_category"] if sheet_integration else None),
       "enabled":sheet_agent["enabled"] if sheet_agent else False,"paused":sheet_agent["paused"] if sheet_agent else True,
-      "oauth_expiry_warning":os.getenv("GOOGLE_OAUTH_PUBLISHING_STATUS","TESTING").upper()=="TESTING"}
+      "oauth_expiry_warning":os.getenv("GOOGLE_OAUTH_PUBLISHING_STATUS","IN_PRODUCTION").upper()=="TESTING"}
     return result
 
 
@@ -257,7 +257,7 @@ async def google_sheets_status(_: Principal = Depends(_owner)):
       "rows_updated":(last["payload"] or {}).get("rows_updated",0) if last else 0,
       "error_category":sync["error_category"] if sync else (integration["last_error_category"] if integration else None),
       "enabled":agent["enabled"] if agent else False,"paused":agent["paused"] if agent else True,
-      "oauth_expiry_warning":os.getenv("GOOGLE_OAUTH_PUBLISHING_STATUS","TESTING").upper()=="TESTING"}
+      "oauth_expiry_warning":os.getenv("GOOGLE_OAUTH_PUBLISHING_STATUS","IN_PRODUCTION").upper()=="TESTING"}
 
 
 @app.post("/api/v1/integrations/google-sheets/sync",status_code=202)

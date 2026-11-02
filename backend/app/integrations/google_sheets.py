@@ -12,10 +12,6 @@ class SheetsValuesAPI(Protocol):
     def batch_update(self, *, spreadsheet_id: str, data: list[dict[str, Any]], value_input_option: str) -> None: ...
 
 
-class DriveSnapshotAPI(Protocol):
-    def copy(self, *, file_id: str, name: str) -> dict[str, str]: ...
-
-
 @dataclass(frozen=True)
 class SnapshotProof:
     source_spreadsheet_id: str
@@ -30,19 +26,6 @@ class PlannedCellUpdate:
     row_number: int
     column_index: int
     value: Any
-
-
-def create_snapshot(drive: DriveSnapshotAPI, spreadsheet_id: str, *, timestamp: datetime | None = None) -> SnapshotProof:
-    if not spreadsheet_id or len(spreadsheet_id) > 200:
-        raise ValueError("spreadsheet identity is invalid")
-    captured = timestamp or datetime.now(timezone.utc)
-    name = f"BruteApply pre-sync snapshot {captured.strftime('%Y%m%dT%H%M%SZ')}"
-    copy = drive.copy(file_id=spreadsheet_id, name=name)
-    snapshot_id = copy.get("id")
-    mime_type = copy.get("mimeType")
-    if not snapshot_id or mime_type != "application/vnd.google-apps.spreadsheet":
-        raise RuntimeError("Google Drive did not confirm a native spreadsheet snapshot")
-    return SnapshotProof(spreadsheet_id, snapshot_id, name, captured, True)
 
 
 def read_applications(api: SheetsValuesAPI, spreadsheet_id: str) -> list[list[Any]]:

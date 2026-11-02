@@ -1,4 +1,4 @@
-"""Google Sheets/Drive REST transport using an owner-authorized OAuth refresh file.
+"""Google Sheets REST transport using an owner-authorized OAuth refresh file.
 
 Only fixed Google API origins are contacted. The credential file is private,
 runtime-only, and its contents are never included in exceptions or logs.
@@ -20,11 +20,9 @@ import httpx
 
 GOOGLE_SCOPES = (
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive.file",
 )
 OAUTH_HOST = "oauth2.googleapis.com"
 API_HOST = "sheets.googleapis.com"
-DRIVE_HOST = "www.googleapis.com"
 
 # httpx's default INFO request logger records full URLs, including the private
 # spreadsheet identifier. Keep OAuth and Sheets request URLs out of logs.
@@ -85,13 +83,17 @@ class GoogleOAuthREST:
 
     def _request(self, method: str, url: str, *, json_body: dict | None = None,
                  params: dict[str,str] | None = None, retries: int = 3) -> dict[str,Any]:
+        # Validate before attaching the bearer token. The production credential
+        # may still carry its historical Drive grant until a separate rotation.
+        parsed=httpx.URL(url)
+        if parsed.scheme!="https" or parsed.host!=API_HOST or parsed.port not in {None,443} or parsed.username or parsed.password:
+            raise RuntimeError("Google API origin validation failed")
         for attempt in range(retries):
             with httpx.Client(timeout=httpx.Timeout(20,connect=5),follow_redirects=False,transport=self._transport) as client:
                 try:
                     response=client.request(method,url,headers={"Authorization":"Bearer "+self._token(),
                         "Accept":"application/json"},json=json_body,params=params)
-                    allowed={API_HOST,DRIVE_HOST}
-                    if response.url.scheme!="https" or response.url.host not in allowed:
+                    if response.url.scheme!="https" or response.url.host!=API_HOST:
                         raise RuntimeError("Google API origin validation failed")
                     if response.status_code in {429,500,502,503,504} and attempt+1<retries:
                         self._sleep(min(2**attempt,4))
@@ -166,11 +168,3 @@ class GoogleOAuthREST:
         if not isinstance(matches,list):
             raise RuntimeError("Google Sheets metadata response is invalid")
         return matches
-
-    def copy(self, *, file_id: str, name: str) -> dict[str,str]:
-        if not file_id or len(file_id)>200 or len(name)>200:
-            raise ValueError("Google Drive snapshot parameters are invalid")
-        # Non-idempotent copy: one attempt only, so a timeout cannot create
-        # duplicate owner-visible snapshots on automatic retry.
-        return self._request("POST",f"https://{DRIVE_HOST}/drive/v3/files/{quote(file_id,safe='')}/copy",
-                             json_body={"name":name},params={"fields":"id,mimeType"},retries=1)

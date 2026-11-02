@@ -25,6 +25,30 @@ from app.integrations.google_oauth_rest import GOOGLE_SCOPES, OAUTH_HOST
 
 
 REDIRECT_URI="http://127.0.0.1:8765/callback"
+DEFAULT_OUTPUT_NAME="google-oauth-sheets-only.json"
+
+
+def _default_output_path(home: Path | None = None) -> Path:
+    return (home or Path.home())/".local/state/bruteapply"/DEFAULT_OUTPUT_NAME
+
+
+def _authorization_url(client_id: str, state: str, challenge: str) -> str:
+    query=urlencode({"client_id":client_id,"redirect_uri":REDIRECT_URI,"response_type":"code",
+      "scope":" ".join(GOOGLE_SCOPES),"access_type":"offline","prompt":"consent",
+      # Do not incrementally carry the old Drive grant into this narrower token.
+      "include_granted_scopes":"false","state":state,
+      "code_challenge":challenge,"code_challenge_method":"S256"})
+    return f"https://accounts.google.com/o/oauth2/v2/auth?{query}"
+
+
+def _validate_granted_scopes(payload: dict) -> None:
+    # Google may omit `scope` when the granted scopes exactly match the request.
+    # If supplied, reject any broader grant before the refresh token is persisted.
+    granted=payload.get("scope")
+    if granted is None:
+        return
+    if not isinstance(granted,str) or set(granted.split())!=set(GOOGLE_SCOPES):
+        raise RuntimeError("Google authorization granted unexpected scopes; no credential was saved")
 
 
 class CallbackHandler(BaseHTTPRequestHandler):
@@ -70,16 +94,18 @@ def _read_client(path: Path) -> tuple[str,str]:
     return client_id,client_secret
 
 
-def _exchange(code: str, verifier: str, client_id: str, client_secret: str) -> str:
+def _exchange(code: str, verifier: str, client_id: str, client_secret: str, *,
+              transport: httpx.BaseTransport | None = None) -> str:
     request_body=urlencode({"code":code,"client_id":client_id,"client_secret":client_secret,
       "redirect_uri":REDIRECT_URI,"grant_type":"authorization_code","code_verifier":verifier})
     try:
-        with httpx.Client(timeout=httpx.Timeout(15,connect=5),follow_redirects=False) as client:
+        with httpx.Client(timeout=httpx.Timeout(15,connect=5),follow_redirects=False,transport=transport) as client:
             response=client.post(f"https://{OAUTH_HOST}/token",data=request_body)
             if response.url.scheme!="https" or response.url.host!=OAUTH_HOST:
                 raise RuntimeError("Google token endpoint origin validation failed")
             response.raise_for_status()
             payload=response.json()
+        _validate_granted_scopes(payload)
         refresh=payload.get("refresh_token")
         if not isinstance(refresh,str) or not refresh:
             raise RuntimeError("Google did not issue offline authorization; no credential was saved")
@@ -93,7 +119,7 @@ def _exchange(code: str, verifier: str, client_id: str, client_secret: str) -> s
 def main() -> int:
     parser=argparse.ArgumentParser(description="Authorize BruteApply's Google Sheets connector through a private local browser flow")
     parser.add_argument("--oauth-client-file",required=True,type=Path)
-    parser.add_argument("--output",type=Path,default=Path.home()/".local/state/bruteapply/google-oauth.json")
+    parser.add_argument("--output",type=Path,default=_default_output_path())
     args=parser.parse_args()
     try:
         client_id,client_secret=_read_client(args.oauth_client_file)
@@ -104,10 +130,7 @@ def main() -> int:
         state=secrets.token_urlsafe(32)
         verifier=base64.urlsafe_b64encode(secrets.token_bytes(48)).decode().rstrip("=")
         challenge=base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
-        query=urlencode({"client_id":client_id,"redirect_uri":REDIRECT_URI,"response_type":"code",
-          "scope":" ".join(GOOGLE_SCOPES),"access_type":"offline","prompt":"consent",
-          "state":state,"code_challenge":challenge,"code_challenge_method":"S256"})
-        authorize_url=f"https://accounts.google.com/o/oauth2/v2/auth?{query}"
+        authorize_url=_authorization_url(client_id,state,challenge)
         server=HTTPServer(("127.0.0.1",8765),CallbackHandler)
         server.oauth_state=state;server.oauth_result=None
         print("A Google authorization page will open in your browser. No password or credential is requested by this script.")
@@ -124,7 +147,7 @@ def main() -> int:
             json.dump({"client_id":client_id,"client_secret":client_secret,"refresh_token":refresh},stream)
             stream.write("\n");stream.flush();os.fsync(stream.fileno())
         print(f"Google OAuth credential created with mode 0600: {args.output}")
-        print("No token value was displayed. The authorized API scopes are listed in BruteApply documentation.")
+        print("No token value was displayed. Only the Google Sheets API scope was requested.")
         return 0
     except Exception as exc:
         print(f"Google OAuth setup failed: {exc}",file=sys.stderr)

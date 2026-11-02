@@ -166,7 +166,7 @@ services:
     environment:
       <<: *application_environment
       GOOGLE_OAUTH_CREDENTIAL_FILE: /run/secrets/google_oauth
-      GOOGLE_OAUTH_PUBLISHING_STATUS: ${GOOGLE_OAUTH_PUBLISHING_STATUS:-TESTING}
+      GOOGLE_OAUTH_PUBLISHING_STATUS: ${GOOGLE_OAUTH_PUBLISHING_STATUS:-IN_PRODUCTION}
       GOOGLE_SHEETS_SPREADSHEET_ID: ${GOOGLE_SHEETS_SPREADSHEET_ID:?set private tracker identifier}
       GOOGLE_SHEETS_STATE_DIR: /var/lib/bruteapply/private-state
     secrets: [database_url, document_encryption_key, google_oauth]
