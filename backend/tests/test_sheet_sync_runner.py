@@ -5,7 +5,7 @@ import pytest
 
 from app.domain.sheet_sync import APPLICATION_HEADERS, FORMULA_COLUMNS
 from app.integrations.sheet_sync_runner import (
-    _db_row, _map_status, _metadata_row, _owner_fields, _verify_preservation,
+    _db_row, _legacy_date_mismatch, _map_status, _metadata_row, _owner_fields, _verify_preservation,
 )
 
 
@@ -30,6 +30,14 @@ def _export():
 
 def test_metadata_identity_tracks_row_not_visible_application_id():
     assert _metadata_row(MetadataAPI(),"0fdd6c23-0647-49f7-a3fc-e02638c44518")== (10,42)
+
+
+def test_legacy_date_is_preserved_only_for_first_exact_url_association():
+    url="https://careers.example/job/123"
+    assert _legacy_date_mismatch(False,url,url,{1})
+    assert not _legacy_date_mismatch(True,url,url,{1})
+    assert not _legacy_date_mismatch(False,"https://careers.example/job/other",url,{1})
+    assert not _legacy_date_mismatch(False,url,url,{3})
 
 
 def test_sheet_status_never_proves_submission():

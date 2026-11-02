@@ -268,6 +268,12 @@ def _make_conflict(conn,record,row_number,fields,remote,db_values,key):
           (uuid4(),app_id,SPREADSHEET_ID,row_number,Jsonb(sorted(set(fields))),remote_blob,db_blob))
 
 
+def _legacy_date_mismatch(mapping_exists:bool, sheet_url:Any, canonical_url:str,
+                          mismatch_fields:set[int])->bool:
+    """Recognize an exact-URL, first-association legacy date discrepancy."""
+    return (not mapping_exists and str(sheet_url or "").strip()==canonical_url and 1 in mismatch_fields)
+
+
 def run_sync(task_id:str, *, api:GoogleOAuthREST|None=None, max_records:int|None=None) -> dict[str,int]:
     if not SPREADSHEET_ID or len(SPREADSHEET_ID)>200:
         raise RuntimeError("Google Sheets tracker is not configured")
@@ -312,7 +318,6 @@ def run_sync(task_id:str, *, api:GoogleOAuthREST|None=None, max_records:int|None
               AND sheet_id=%s AND state='RESOLVED' AND resolution='DATABASE_WINS'
               ORDER BY resolved_at DESC LIMIT 1""",(app_id,SPREADSHEET_ID)).fetchone()
             force_database_wins=bool((mapping and mapping.get("conflict_state")=="DATABASE_WINS") or resolved_row_decision)
-            existing_open=conn.execute("SELECT id FROM sheet_sync_conflict WHERE application_id=%s AND state='OPEN' LIMIT 1",(app_id,)).fetchone()
             row_num,metadata_id=_metadata_row(client,app_id)
             url_rows=by_url.get(record["canonical_url"],[])
             if row_num is None and len(url_rows)>1:
@@ -342,8 +347,19 @@ def run_sync(task_id:str, *, api:GoogleOAuthREST|None=None, max_records:int|None
                 _make_conflict(conn,record,row_num,["Company/title identity"],
                   {"Company":sheet_row[3],"Job Title":sheet_row[4]},
                   {"Company":record["company"],"Job Title":record["title"]},key);conflicts+=1;continue
+            preserved=set(mapping.get("preserved_sheet_fields") or []) if mapping else set()
+            # Preserve the owner's historical Date Found when first associating
+            # an exact-URL legacy row, and record the exception encrypted.
+            existing_open=conn.execute("SELECT id,fields FROM sheet_sync_conflict WHERE application_id=%s AND sheet_id=%s AND state='OPEN' ORDER BY created_at LIMIT 1",(app_id,SPREADSHEET_ID)).fetchone()
+            legacy_date_audited=False
             if existing_open:
-                conflicts+=1;continue
+                fields=set(existing_open["fields"] or [])
+                if fields=={"Date Found"} and not mapping:
+                    conn.execute("UPDATE sheet_sync_conflict SET state='RESOLVED',resolution='LEGACY_SHEET_VALUE_PRESERVED',resolved_at=now() WHERE id=%s",(existing_open["id"],))
+                    preserved.add(1)
+                    legacy_date_audited=True
+                else:
+                    conflicts+=1;continue
             baseline=None
             if mapping and mapping.get("owner_baseline_ciphertext"):
                 baseline=json.loads(decrypt_document(mapping["owner_baseline_ciphertext"],key,app_id))
@@ -364,6 +380,16 @@ def run_sync(task_id:str, *, api:GoogleOAuthREST|None=None, max_records:int|None
                         remote_changed=sheet_row[i]!=baseline[i]
                         db_changed=db_row[i]!=baseline[i]
                         if remote_changed and db_changed and sheet_row[i]!=db_row[i]: remote_conflicts.append(i)
+                if _legacy_date_mismatch(bool(mapping),sheet_row[13],record["canonical_url"],set(remote_conflicts)):
+                    # Date Found on a legacy tracker row is historical owner
+                    # evidence; never replace it with a later import timestamp.
+                    if not legacy_date_audited:
+                        _make_conflict(conn,record,row_num,["Date Found"],{"Date Found":sheet_row[1]},
+                          {"Date Found":db_row[1]},key)
+                        conn.execute("UPDATE sheet_sync_conflict SET state='RESOLVED',resolution='LEGACY_SHEET_VALUE_PRESERVED',resolved_at=now() WHERE application_id=%s AND sheet_id=%s AND state='OPEN'",(app_id,SPREADSHEET_ID))
+                    preserved.add(1)
+                    remote_conflicts.remove(1)
+                remote_conflicts=[i for i in remote_conflicts if i not in preserved]
                 if remote_conflicts and not force_database_wins:
                     fields=[APPLICATION_HEADERS[i] for i in remote_conflicts]
                     _make_conflict(conn,record,row_num,fields,{APPLICATION_HEADERS[i]:sheet_row[i] for i in remote_conflicts},
@@ -381,7 +407,7 @@ def run_sync(task_id:str, *, api:GoogleOAuthREST|None=None, max_records:int|None
                   "metadataValue":str(app_id),"visibility":"DOCUMENT","location":{"dimensionRange":{"sheetId":sheet_id,
                   "dimension":"ROWS","startIndex":row_num-1,"endIndex":row_num}}}}})
             for idx in sorted(SYSTEM_OWNED|MERGEABLE):
-                if idx in FORMULA_COLUMNS:continue
+                if idx in FORMULA_COLUMNS or idx in preserved:continue
                 value=db_row[idx]
                 if idx==16 and not is_new and sheet_row[idx] not in (None,"") and not force_database_wins:
                     continue
@@ -421,15 +447,17 @@ def run_sync(task_id:str, *, api:GoogleOAuthREST|None=None, max_records:int|None
             if mapping:=conn.execute("SELECT id FROM sheet_mapping WHERE application_id=%s",(app_id,)).fetchone():
                 conn.execute("""UPDATE sheet_mapping SET sheet_id=%s,sheet_row=%s,visible_application_id=%s,
                   last_sheet_hash=%s,last_database_hash=%s,last_synced_at=now(),conflict_state=NULL,
-                  owner_baseline_ciphertext=%s WHERE application_id=%s""",
-                  (SPREADSHEET_ID,row_num,current[0],sheet_hash,database_hash,baseline_cipher,app_id))
+                  owner_baseline_ciphertext=%s,developer_metadata_id=%s,
+                  preserved_sheet_fields=%s WHERE application_id=%s""",
+                  (SPREADSHEET_ID,row_num,current[0],sheet_hash,database_hash,baseline_cipher,metadata_id,
+                   sorted(preserved),app_id))
                 conn.execute("UPDATE application SET sheet_row=%s,sheet_visible_id=%s WHERE id=%s",(row_num,current[0],app_id))
                 if row_num in written_rows: updated+=1
             else:
                 conn.execute("""INSERT INTO sheet_mapping(id,application_id,sheet_id,sheet_row,visible_application_id,
-                  last_sheet_hash,last_database_hash,last_synced_at,owner_baseline_ciphertext)
-                  VALUES (%s,%s,%s,%s,%s,%s,%s,now(),%s)""",
-                  (uuid4(),app_id,SPREADSHEET_ID,row_num,current[0],sheet_hash,database_hash,baseline_cipher))
+                  last_sheet_hash,last_database_hash,last_synced_at,owner_baseline_ciphertext,developer_metadata_id,preserved_sheet_fields)
+                  VALUES (%s,%s,%s,%s,%s,%s,%s,now(),%s,%s,%s)""",
+                  (uuid4(),app_id,SPREADSHEET_ID,row_num,current[0],sheet_hash,database_hash,baseline_cipher,metadata_id,sorted(preserved)))
                 created+=1
                 conn.execute("UPDATE application SET sheet_row=%s,sheet_visible_id=%s WHERE id=%s",(row_num,current[0],app_id))
             if force_database_wins and resolved_row_decision:
