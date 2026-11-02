@@ -351,7 +351,7 @@ function ProfilePage({mode,notify}:{mode:string;notify:(s:string)=>void}) {
   const resumeVerifiedCount=resumeFacts.filter(item=>item.status==="RESUME_VERIFIED").length;
   const resumeReviewCount=resumeFacts.filter(item=>item.status==="NEEDS_REVIEW").length;
   const structuredProfileCount=Object.values(facts).filter(value=>String(value||"").trim()).length;
-  const ownerAnswerFields=["city","province","work_modes","work_authorization","sponsorship_requirement","relocation","availability","start_date","shift_availability","evenings_weekends","on_call_availability","travel_availability","driver_license","language_proficiency","salary_expectations"];
+  const ownerAnswerFields=["full_name","contact_email","phone","city","province","work_modes","work_authorization","sponsorship_requirement","relocation","availability","start_date","shift_availability","evenings_weekends","on_call_availability","travel_availability","driver_license","language_proficiency","salary_expectations"];
   const ownerAnswerLabels=new Map(fields.map(([key,label])=>[key,label]));
   const missingOwnerAnswers=ownerAnswerFields.filter(key=>!String(facts[key]||"").trim());
   return <><PageHeading eyebrow="VERIFIED CANDIDATE FACTS" title="My profile" subtitle="Only owner-reviewed facts can be used in applications." />
