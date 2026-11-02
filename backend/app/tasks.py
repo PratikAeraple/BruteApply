@@ -48,6 +48,12 @@ celery_app.conf.update(
         "schedule-google-sheets-sync-four-hourly": {
             "task": "bruteapply.sync_google_sheet", "schedule": crontab(minute=0, hour="*/4"),
         },
+        "schedule-profile-job-rematching-four-hourly": {
+            "task": "bruteapply.match_enabled_jobs", "schedule": crontab(minute=20, hour="*/4"),
+        },
+        "schedule-private-document-export-four-hourly": {
+            "task": "bruteapply.prepare_documents", "schedule": crontab(minute=35, hour="*/4"),
+        },
         "refresh-cloudflare-access-signing-keys": {
          "task": "bruteapply.refresh_access_jwks", "schedule": crontab(minute=7, hour="*/6"),
         },
@@ -292,6 +298,38 @@ def discover_enabled_sources(self):
     return {"state":"SUCCEEDED","sources":len(results),"results":results}
 
 
+@celery_app.task(bind=True,name="bruteapply.match_enabled_jobs",max_retries=3,default_retry_delay=60)
+def match_enabled_jobs(self):
+    """Re-score the existing job catalogue using verified normal resume facts."""
+    _ensure_db()
+    with db.connection() as conn:
+        state=conn.execute("SELECT enabled,paused,drain FROM agent_configuration WHERE agent='matching'").fetchone()
+    if not state or not state["enabled"] or state["paused"] or state["drain"]:
+        return {"state":"PAUSED","jobs_scored":0}
+    slot=datetime.now(ZoneInfo("America/Toronto")).strftime("%Y-%m-%d:") + str(datetime.now(ZoneInfo("America/Toronto")).hour//4)
+    identity=f"matching:{slot}"
+    with db.connection() as conn:
+        with conn.transaction():
+            if not _claim_task(conn,identity,"job_matching"):
+                return {"state":"ALREADY_PROCESSED","jobs_scored":0}
+            job_ids=[row["id"] for row in conn.execute("SELECT id FROM job ORDER BY discovered_at DESC LIMIT 500").fetchall()]
+    scored=0
+    try:
+        for job_id in job_ids:
+            with db.connection() as conn:
+                with conn.transaction():
+                    scored+=int(_score_new_job(conn,job_id))
+        with db.connection() as conn:
+            with conn.transaction(): _finish_task(conn,identity,payload={"jobs_scored":scored})
+    except Exception as exc:
+        category=type(exc).__name__[:80]
+        with db.connection() as conn:
+            with conn.transaction(): _finish_task(conn,identity,"FAILED",category,{"jobs_scored":scored})
+        logger.warning("job matching failed category=%s",category)
+        raise self.retry(exc=RuntimeError(category),countdown=min(60*(2**self.request.retries),1800))
+    return {"state":"SUCCEEDED","jobs_scored":scored}
+
+
 @celery_app.task(bind=True,name="bruteapply.sync_google_sheet",max_retries=5,default_retry_delay=60)
 def sync_google_sheet(self, max_records: int | None = None):
     _ensure_db()
@@ -342,9 +380,84 @@ def sync_google_sheet(self, max_records: int | None = None):
         raise
 
 
-@celery_app.task(name="bruteapply.prepare_documents")
-def prepare_documents():
-    raise RuntimeError("Document job queue is not activated; generation remains owner initiated")
+@celery_app.task(bind=True,name="bruteapply.prepare_documents",max_retries=3,default_retry_delay=60)
+def prepare_documents(self):
+    """Export already-provenanced private drafts to PDF and editable DOCX."""
+    _ensure_db()
+    with db.connection() as conn:
+        state=conn.execute("SELECT enabled,paused,drain FROM agent_configuration WHERE agent='documents'").fetchone()
+    if not state or not state["enabled"] or state["paused"] or state["drain"]:
+        return {"state":"PAUSED","source_documents":0,"artifacts_created":0}
+    identity="document-export:v1"
+    orphan_paths=[]
+    try:
+        from .domain.document_export import render_docx, render_pdf
+        from .storage import decrypt_document, load_key_file, store_private_blob
+        from . import config
+        key=load_key_file(__import__("os").getenv("DOCUMENT_ENCRYPTION_KEY_FILE",""))
+        with db.connection() as conn:
+            sources=conn.execute("""SELECT d.id,d.profile_id,d.application_id,d.job_id,d.document_type,d.sha256,d.size_bytes,
+              d.storage_key,d.resume_base_id,d.provenance FROM document d
+              WHERE d.encrypted AND d.mime_type='text/plain'
+                AND d.document_type IN ('TAILORED_RESUME','COVER_LETTER','SCREENING_RESPONSE','APPLICATION_SUMMARY')
+                AND (d.application_id IS NOT NULL OR d.job_id IS NOT NULL)
+              ORDER BY d.created_at DESC LIMIT 40""").fetchall()
+        created=0; processed=0
+        for source in sources:
+            with db.connection() as conn:
+                with conn.transaction():
+                    locked=conn.execute("SELECT id FROM document WHERE id=%s FOR UPDATE",(source["id"],)).fetchone()
+                    existing={row["format"] for row in conn.execute(
+                      "SELECT provenance->>'format' AS format FROM document WHERE provenance->>'source_document_id'=%s",
+                      (str(source["id"]),)).fetchall()}
+                    missing=[fmt for fmt in ("pdf","docx") if fmt not in existing]
+                    if not locked or not missing: continue
+                    if not re.fullmatch(r"[0-9a-f]{2}/[0-9a-f]{32}\.txt\.enc",source["storage_key"]):
+                        continue
+                    path=config.DOCUMENT_ROOT/source["storage_key"]
+                    if path.is_symlink() or not path.is_file(): continue
+                    encrypted=path.read_bytes()
+                    text_bytes=decrypt_document(encrypted,key,source["id"])
+                    if hashlib.sha256(text_bytes).hexdigest()!=source["sha256"] or len(text_bytes)!=source["size_bytes"]:
+                        continue
+                    text=text_bytes.decode("utf-8")
+                    for fmt in missing:
+                        data=render_pdf(text) if fmt=="pdf" else render_docx(text)
+                        new_id,storage_key,sha=store_private_blob(data,fmt,config.DOCUMENT_ROOT,key)
+                        orphan_paths.append(storage_key)
+                        mime="application/pdf" if fmt=="pdf" else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        provenance={**(source["provenance"] or {}),"format":fmt,"source_document_id":str(source["id"]),
+                          "generator":"provenance-preserving-export-v1"}
+                        conn.execute("""INSERT INTO document(id,profile_id,application_id,job_id,document_type,sha256,mime_type,
+                          size_bytes,storage_key,encrypted,resume_base_id,provenance)
+                          VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,true,%s,%s)""",
+                          (new_id,source["profile_id"],source["application_id"],source["job_id"],source["document_type"],
+                           sha,mime,len(data),storage_key,source["resume_base_id"],Jsonb(provenance)))
+                        conn.execute("""INSERT INTO audit_event(id,actor,action,object_type,object_id,request_id,result,metadata)
+                          VALUES (%s,'document-worker','PRIVATE_DOCUMENT_EXPORTED','document',%s,%s,%s,%s)""",
+                          (uuid4(),new_id,uuid4(),source["document_type"],Jsonb({"format":fmt,"source_document_id":str(source["id"])})))
+                        created+=1
+                    processed+=1
+            # This source's rows committed successfully. Keep their encrypted
+            # files and reserve cleanup only for a later failed transaction.
+            orphan_paths.clear()
+        with db.connection() as conn:
+            with conn.transaction():
+                conn.execute("""INSERT INTO worker_job(id,idempotency_key,task_name,state,attempts,started_at,completed_at,payload)
+                  VALUES (%s,%s,'document_export','SUCCEEDED',1,now(),now(),%s)
+                  ON CONFLICT(idempotency_key) DO UPDATE SET state='SUCCEEDED',attempts=worker_job.attempts+1,
+                  completed_at=now(),error_category=NULL,payload=EXCLUDED.payload""",
+                  (uuid4(),identity,Jsonb({"source_documents":processed,"artifacts_created":created})))
+        return {"state":"SUCCEEDED","source_documents":processed,"artifacts_created":created}
+    except Exception as exc:
+        for storage_key in orphan_paths:
+            try:
+                (config.DOCUMENT_ROOT/storage_key).unlink(missing_ok=True)
+            except OSError:
+                pass
+        category=type(exc).__name__[:80]
+        logger.warning("private document export failed category=%s",category)
+        raise self.retry(exc=RuntimeError(category),countdown=min(60*(2**self.request.retries),1800))
 
 
 @celery_app.task(name="bruteapply.submit_application")

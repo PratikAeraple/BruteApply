@@ -281,7 +281,9 @@ def test_generated_private_blob_is_encrypted_and_randomly_named(tmp_path):
     assert decrypt_document(encrypted,key,identity)==contents
     assert digest==__import__("hashlib").sha256(contents).hexdigest()
     assert (tmp_path/path).stat().st_mode & 0o777==0o600
-    with pytest.raises(ValueError): store_private_blob(contents,"pdf",tmp_path,key)
+    pdf_identity,pdf_path,_=store_private_blob(contents,"pdf",tmp_path,key)
+    assert pdf_path.endswith(".pdf.enc") and decrypt_document((tmp_path/pdf_path).read_bytes(),key,pdf_identity)==contents
+    with pytest.raises(ValueError): store_private_blob(contents,"png",tmp_path,key)
 
 
 def test_key_file_allows_private_secret_group_read_but_rejects_other_access(tmp_path):

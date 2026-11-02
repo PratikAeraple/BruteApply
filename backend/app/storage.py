@@ -90,8 +90,8 @@ def store_private(data: bytes, display_name: str, root: Path, key: bytes) -> tup
 
 
 def store_private_blob(data: bytes, suffix: str, root: Path, key: bytes) -> tuple[uuid.UUID, str, str]:
-    """Persist generated non-PDF text with randomized path and authenticated encryption."""
-    if not data or len(data)>MAX_UPLOAD_BYTES or suffix not in {"txt","md"}:
+    """Persist generated private artifacts with randomized paths and encryption."""
+    if not data or len(data)>MAX_UPLOAD_BYTES or suffix not in {"txt","md","pdf","docx"}:
         raise ValueError("private document payload is outside the supported bounds")
     identity=uuid.uuid4()
     if root.is_symlink():

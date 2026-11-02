@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+from io import BytesIO
 from uuid import UUID, uuid4
 from typing import Literal
 
@@ -47,7 +48,7 @@ DEMO_TICKETS = [
     {"id":"BA-DEMO-1042","category":"SENSITIVE_QUESTION","priority":"HIGH","status":"OPEN","summary":"Employer asks for a sensitive declaration","required_action":"Review the question and provide an approved answer or skip."},
     {"id":"BA-DEMO-1041","category":"MANUAL_SUBMISSION_REQUIRED","priority":"NORMAL","status":"OPEN","summary":"Application provider requires an interactive account step","required_action":"Open the employer site and complete it manually if desired."},
 ]
-RUNNABLE_WORKERS: set[str] = {"discovery", "sheet_sync"}
+RUNNABLE_WORKERS: set[str] = {"discovery", "matching", "documents", "sheet_sync"}
 
 
 @asynccontextmanager
@@ -148,8 +149,8 @@ async def overview(_: Principal = Depends(_owner)):
     # DISCOVERED lifecycle after qualification/matching.
     result["counts"]["discovered"]=jobs
     result["workers"]={r["agent"]:("EMERGENCY STOP" if r["emergency_stopped"] else "NOT CONFIGURED"
-                                  if r["agent"] not in RUNNABLE_WORKERS else "PAUSED" if r["paused"]
-                                  else "ENABLED" if r["enabled"] else "STOPPED") for r in agent_rows}
+                                  if r["agent"] not in RUNNABLE_WORKERS else "DRAINING" if r["drain"]
+                                  else "PAUSED" if r["paused"] else "RUNNING" if r["enabled"] else "STOPPED") for r in agent_rows}
     try:
         import redis
         client=redis.Redis.from_url(config.REDIS_URL,socket_connect_timeout=1,socket_timeout=1)
@@ -389,9 +390,9 @@ async def application_readiness(_:Principal=Depends(_owner)):
           LEFT JOIN job_source s ON s.id=j.source_id ORDER BY m.score DESC NULLS LAST,a.updated_at DESC""").fetchall()
         result=[]
         for row in rows:
-            docs=conn.execute("""SELECT id::text,document_type,sha256,size_bytes,created_at FROM document
+            docs=conn.execute("""SELECT id::text,document_type,sha256,size_bytes,created_at,mime_type,provenance FROM document
               WHERE application_id=%s OR (job_id=%s AND application_id IS NULL)
-              ORDER BY created_at DESC""",(row["application_id"],row["job_id"])).fetchall()
+              ORDER BY CASE provenance->>'format' WHEN 'pdf' THEN 0 WHEN 'docx' THEN 1 ELSE 2 END,created_at DESC""",(row["application_id"],row["job_id"])).fetchall()
             tickets=conn.execute("""SELECT id::text,category,state,priority FROM ticket
               WHERE state IN ('OPEN','IN_PROGRESS') AND (application_id=%s OR job_id=%s)
               ORDER BY created_at""",(row["application_id"],row["job_id"])).fetchall()
@@ -844,9 +845,10 @@ def _profile_rows(profile_id: UUID, facts: dict[str, str], actor: str, key: byte
             raise HTTPException(422,"invalid profile fact key")
         fact_id=uuid4()
         sensitivity="SENSITIVE" if _is_sensitive_fact(name) else "NORMAL"
-        conn.execute("""INSERT INTO profile_fact(id,profile_id,fact_key,value_ciphertext,verified,source,sensitivity)
-          VALUES (%s,%s,%s,%s,false,%s,%s)""",
-            (fact_id,profile_id,name,encrypt_document(value.encode(),key,fact_id),"owner-entered; review required",sensitivity))
+        conn.execute("""INSERT INTO profile_fact(id,profile_id,fact_key,value_ciphertext,verified,source,sensitivity,provenance)
+          VALUES (%s,%s,%s,%s,false,%s,%s,%s)""",
+            (fact_id,profile_id,name,encrypt_document(value.encode(),key,fact_id),"owner-entered; review required",sensitivity,
+             Jsonb({"source":"owner-input","review_required":True})))
     conn.execute("INSERT INTO audit_event(id,actor,action,object_type,object_id,request_id,result) VALUES (%s,%s,%s,%s,%s,%s,%s)",
                  (uuid4(),actor,"PROFILE_CREATED","candidate_profile",profile_id,uuid4(),"FACTS_PENDING_REVIEW"))
 
@@ -862,9 +864,10 @@ async def get_profile(principal: Principal = Depends(_owner)):
         if not profile:
             return {"configured":False,"facts":{},"verified_count":0,"pending_count":0,"fact_status":{}}
         facts=json.loads(decrypt_document(profile["facts_ciphertext"],key,profile["id"]))
-        statuses=conn.execute("SELECT fact_key,verified,sensitivity FROM profile_fact WHERE profile_id=%s",(profile["id"],)).fetchall()
+        statuses=conn.execute("SELECT fact_key,verified,sensitivity,source,provenance,approved_at FROM profile_fact WHERE profile_id=%s",(profile["id"],)).fetchall()
     counts={False:0,True:0}
-    fact_status={row["fact_key"]:{"verified":row["verified"],"sensitivity":row["sensitivity"]} for row in statuses}
+    fact_status={row["fact_key"]:{"verified":row["verified"],"sensitivity":row["sensitivity"],
+      "source":row["source"],"provenance":row["provenance"],"approved_at":row["approved_at"]} for row in statuses}
     for item in statuses: counts[bool(item["verified"])]+=1
     return {"configured":True,"facts":facts,"verified_count":counts[True],
             "pending_count":counts[False],"fact_status":fact_status}
@@ -919,13 +922,15 @@ async def update_profile(payload: ProfileInput, principal: Principal = Depends(_
                 sensitivity="SENSITIVE" if _is_sensitive_fact(name) else "NORMAL"
                 if fact:
                     conn.execute("""UPDATE profile_fact SET value_ciphertext=%s,verified=false,source='owner-edited; review required',
-                      approved_at=NULL,sensitivity=%s WHERE id=%s""",
-                      (encrypt_document(value.encode(),key,fact["id"]),sensitivity,fact["id"]))
+                      approved_at=NULL,sensitivity=%s,provenance=%s WHERE id=%s""",
+                      (encrypt_document(value.encode(),key,fact["id"]),sensitivity,
+                       Jsonb({"source":"owner-input","review_required":True}),fact["id"]))
                 else:
                     fact_id=uuid4()
-                    conn.execute("""INSERT INTO profile_fact(id,profile_id,fact_key,value_ciphertext,verified,source,sensitivity)
-                      VALUES (%s,%s,%s,%s,false,'owner-entered; review required',%s)""",
-                      (fact_id,profile["id"],name,encrypt_document(value.encode(),key,fact_id),sensitivity))
+                    conn.execute("""INSERT INTO profile_fact(id,profile_id,fact_key,value_ciphertext,verified,source,sensitivity,provenance)
+                      VALUES (%s,%s,%s,%s,false,'owner-entered; review required',%s,%s)""",
+                      (fact_id,profile["id"],name,encrypt_document(value.encode(),key,fact_id),sensitivity,
+                       Jsonb({"source":"owner-input","review_required":True})))
             for name in current.keys()-merged.keys():
                 conn.execute("DELETE FROM profile_fact WHERE profile_id=%s AND fact_key=%s",
                              (profile["id"],name))
@@ -1038,12 +1043,19 @@ async def control_agent(payload: dict, principal: Principal = Depends(_owner)):
             if not row: raise HTTPException(503,"agent control state is unavailable")
             conn.execute("INSERT INTO audit_event(id,actor,action,object_type,request_id,result) VALUES (%s,%s,%s,%s,%s,%s)",
                          (uuid4(),principal.email,"AGENT_CONTROL_"+action,"agent_configuration",uuid4(),agent))
+    if action=="START" and agent in {"discovery","matching","documents"}:
+        from .tasks import celery_app
+        task={"discovery":"bruteapply.discover_enabled_sources",
+              "matching":"bruteapply.match_enabled_jobs",
+              "documents":"bruteapply.prepare_documents"}[agent]
+        celery_app.send_task(task)
     if agent=="sheet_sync" and action=="START":
         with db.connection() as conn:
             prior=conn.execute("SELECT last_success_at FROM sync_state WHERE resource='APPLICATIONS' ORDER BY last_attempt_at DESC LIMIT 1").fetchone()
         from .tasks import celery_app
         celery_app.send_task("bruteapply.sync_google_sheet",kwargs={} if prior and prior["last_success_at"] else {"max_records":1},queue="google-sheets")
-    return {"agent":agent,"enabled":row["enabled"],"paused":row["paused"],"drain":row["drain"]}
+    state="DRAINING" if row["drain"] else "PAUSED" if row["paused"] else "RUNNING" if row["enabled"] else "STOPPED"
+    return {"agent":agent,"enabled":row["enabled"],"paused":row["paused"],"drain":row["drain"],"state":state}
 
 
 @app.post("/api/v1/documents/resumes", status_code=201)
@@ -1194,32 +1206,67 @@ async def generate_private_document(payload: DocumentGenerate, principal: Princi
           job_title=job["title"] if job else "",company=job["company"] if job else "")
     except ValueError as exc:
         raise HTTPException(409,str(exc)) from None
-    data=generated.text.encode("utf-8")
-    identity,storage_key,sha256=store_private_blob(data,"txt",config.DOCUMENT_ROOT,key)
+    from .domain.document_export import render_docx, render_pdf
+    source_text=generated.text
+    generation_hash=hashlib.sha256(source_text.encode("utf-8")).hexdigest()
     doc_type={"ATS_RESUME":"TAILORED_RESUME","COVER_LETTER":"COVER_LETTER",
               "SCREENING_PACKAGE":"SCREENING_RESPONSE","APPLICATION_SUMMARY":"APPLICATION_SUMMARY"}[payload.kind]
-    provenance={"generator":"verified-fact-template-v1","source_fact_ids":[str(x["fact_id"]) for x in generated.provenance],
+    base_provenance={"generator":"verified-fact-template-v2","generation_hash":generation_hash,
+      "source_fact_ids":[str(x["fact_id"]) for x in generated.provenance],
       "variant":variants[payload.variant][0] if payload.variant else None,
       "resume_base_id":str(resume["id"]),"job_id":str(job["id"]) if job else None,
       "application_id":str(application_id) if application_id else None}
+    artifacts=[("txt","text/plain",source_text.encode("utf-8")),
+               ("pdf","application/pdf",render_pdf(source_text)),
+               ("docx","application/vnd.openxmlformats-officedocument.wordprocessingml.document",render_docx(source_text))]
+    pending=[]; saved=[]
     try:
+        for fmt,mime,data in artifacts:
+            identity,storage_key,sha256=store_private_blob(data,fmt,config.DOCUMENT_ROOT,key)
+            pending.append((identity,storage_key))
         with db.connection() as conn:
             with conn.transaction():
-                conn.execute("""INSERT INTO document(id,profile_id,application_id,job_id,document_type,sha256,mime_type,
-                  size_bytes,storage_key,encrypted,resume_base_id,provenance)
-                  VALUES (%s,%s,%s,%s,%s,%s,'text/plain',%s,%s,true,%s,%s)""",
-                  (identity,profile["id"],application_id,job["id"] if job else None,doc_type,sha256,
-                   len(data),storage_key,resume["id"],Jsonb(provenance)))
-                conn.execute("""INSERT INTO audit_event(id,actor,action,object_type,object_id,request_id,result,metadata)
-                  VALUES (%s,%s,'PRIVATE_DOCUMENT_GENERATED','document',%s,%s,%s,%s)""",
-                  (uuid4(),principal.email,identity,uuid4(),doc_type,Jsonb({"sha256":sha256,"claim_count":len(generated.provenance)})))
+                # Serialize generation for the same application/job so two
+                # owner requests cannot create duplicate artifacts.
+                if application_id:
+                    conn.execute("SELECT id FROM application WHERE id=%s FOR UPDATE",(application_id,))
+                elif job:
+                    conn.execute("SELECT id FROM job WHERE id=%s FOR UPDATE",(job["id"],))
+                for (fmt,mime,data),(identity,storage_key) in zip(artifacts,pending,strict=True):
+                    provenance={**base_provenance,"format":fmt}
+                    prior=conn.execute("""SELECT id::text,sha256,mime_type,size_bytes,provenance FROM document
+                      WHERE document_type=%s AND application_id IS NOT DISTINCT FROM %s
+                      AND job_id IS NOT DISTINCT FROM %s AND provenance->>'generation_hash'=%s
+                      AND provenance->>'format'=%s ORDER BY created_at DESC LIMIT 1""",
+                      (doc_type,application_id,job["id"] if job else None,generation_hash,fmt)).fetchone()
+                    if prior:
+                        (config.DOCUMENT_ROOT/storage_key).unlink(missing_ok=True)
+                        pending.remove((identity,storage_key))
+                        saved.append({"id":prior["id"],"document_type":doc_type,"format":fmt,
+                          "mime_type":prior["mime_type"],"size_bytes":prior["size_bytes"],"sha256":prior["sha256"],
+                          "download_url":f"/api/v1/documents/{prior['id']}/download"})
+                        continue
+                    conn.execute("""INSERT INTO document(id,profile_id,application_id,job_id,document_type,sha256,mime_type,
+                      size_bytes,storage_key,encrypted,resume_base_id,provenance)
+                      VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,true,%s,%s)""",
+                      (identity,profile["id"],application_id,job["id"] if job else None,doc_type,sha256,mime,
+                       len(data),storage_key,resume["id"],Jsonb(provenance)))
+                    conn.execute("""INSERT INTO audit_event(id,actor,action,object_type,object_id,request_id,result,metadata)
+                      VALUES (%s,%s,'PRIVATE_DOCUMENT_GENERATED','document',%s,%s,%s,%s)""",
+                      (uuid4(),principal.email,identity,uuid4(),doc_type,Jsonb({"sha256":sha256,"format":fmt,
+                       "claim_count":len(generated.provenance)})))
+                    saved.append({"id":str(identity),"document_type":doc_type,"format":fmt,"mime_type":mime,
+                      "size_bytes":len(data),"sha256":sha256,"download_url":f"/api/v1/documents/{identity}/download"})
+        pending.clear()
+        for item in saved:
+            item["provenance"]={**base_provenance,"format":item["format"]}
+        primary=next(item for item in saved if item["format"]=="pdf")
+        return {**primary,"claim_count":len(generated.provenance),"artifacts":saved}
     except Exception:
-        try: (config.DOCUMENT_ROOT/storage_key).unlink()
-        except OSError: pass
+        for _,storage_key in pending:
+            try: (config.DOCUMENT_ROOT/storage_key).unlink()
+            except OSError: pass
         raise
-    return {"id":str(identity),"document_type":doc_type,"mime_type":"text/plain","size_bytes":len(data),
-      "sha256":sha256,"claim_count":len(generated.provenance),"provenance":generated.provenance,
-      "download_url":f"/api/v1/documents/{identity}/download"}
 
 
 @app.get("/api/v1/documents")
@@ -1239,8 +1286,12 @@ async def download_private_document(document_id: UUID, principal: Principal = De
     with db.connection() as conn:
         row=conn.execute("SELECT sha256,mime_type,size_bytes,storage_key FROM document WHERE id=%s AND encrypted",
                          (document_id,)).fetchone()
-    if not row or row["mime_type"]!="text/plain": raise HTTPException(404,"document not found")
-    if not re.fullmatch(r"[0-9a-f]{2}/[0-9a-f]{32}\.txt\.enc",row["storage_key"]):
+    if not row: raise HTTPException(404,"document not found")
+    formats={"text/plain":("txt","txt"),"application/pdf":("pdf","pdf"),
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document":("docx","docx")}
+    if row["mime_type"] not in formats: raise HTTPException(404,"document not found")
+    extension,_=formats[row["mime_type"]]
+    if not re.fullmatch(rf"[0-9a-f]{{2}}/[0-9a-f]{{32}}\.{extension}\.enc",row["storage_key"]):
         raise HTTPException(500,"document metadata is invalid")
     path=config.DOCUMENT_ROOT/row["storage_key"]
     try:
@@ -1249,8 +1300,24 @@ async def download_private_document(document_id: UUID, principal: Principal = De
     except Exception: raise HTTPException(500,"document could not be opened") from None
     if len(data)!=row["size_bytes"] or hashlib.sha256(data).hexdigest()!=row["sha256"]:
         raise HTTPException(500,"document integrity check failed")
-    return Response(data,media_type="text/plain; charset=utf-8",headers={
-      "Content-Disposition":"attachment; filename=bruteapply-document.txt","Cache-Control":"private, no-store",
+    if extension=="pdf":
+        from pypdf import PdfReader
+        try:
+            if not data.startswith(b"%PDF-") or not PdfReader(BytesIO(data),strict=True).pages:
+                raise ValueError("invalid PDF")
+        except Exception: raise HTTPException(500,"stored PDF failed validation") from None
+    elif extension=="docx":
+        from zipfile import ZipFile, BadZipFile
+        try:
+            with ZipFile(BytesIO(data)) as archive:
+                if "[Content_Types].xml" not in archive.namelist() or "word/document.xml" not in archive.namelist():
+                    raise ValueError("invalid DOCX")
+                if archive.testzip(): raise ValueError("invalid DOCX archive")
+        except (BadZipFile,ValueError): raise HTTPException(500,"stored DOCX failed validation") from None
+    filename=f"bruteapply-{row['document_type'].lower().replace('_','-')}.{extension}"
+    media=row["mime_type"]+"; charset=utf-8" if extension=="txt" else row["mime_type"]
+    return Response(data,media_type=media,headers={
+      "Content-Disposition":f"attachment; filename={filename}","Cache-Control":"private, no-store",
       "X-Content-Type-Options":"nosniff"})
 
 
