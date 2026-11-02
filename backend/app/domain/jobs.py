@@ -37,6 +37,7 @@ def fingerprint(company: str, title: str, location: str, description: str) -> st
 _TARGET_TITLE = re.compile(
     r"\b(help\s*desk|service\s*desk|it support|technical support|product support analyst|desktop support|"
     r"field service (?:technician|support)|field (?:service|support) technician|"
+    r"technical support representative|technical solutions engineer|"
     r"endpoint support|systems? support|it technician|network technician|"
     r"noc (?:technician|analyst)|cloud support|microsoft 365 support|"
     r"systems? administrator|infrastructure (?:support|technician)|operations support)\b", re.I)

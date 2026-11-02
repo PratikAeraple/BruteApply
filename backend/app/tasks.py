@@ -101,6 +101,16 @@ def _insert_job(conn, source_id, board_name: str, raw: dict) -> tuple[bool, obje
     identity=uuid4()
     desc_hash=hashlib.sha256(job.description.encode("utf-8")).hexdigest()
     salary=raw.get("salary") if isinstance(raw.get("salary"),dict) else {}
+    posted_at=raw.get("posted_at")
+    if isinstance(posted_at,str):
+        try:
+            posted_at=datetime.fromisoformat(posted_at.replace("Z","+00:00"))
+            if posted_at.tzinfo is None:
+                posted_at=posted_at.replace(tzinfo=timezone.utc)
+        except ValueError:
+            posted_at=None
+    else:
+        posted_at=None
     salary_min=salary.get("min") if isinstance(salary.get("min"),(int,float)) else None
     salary_max=salary.get("max") if isinstance(salary.get("max"),(int,float)) else None
     currency=salary.get("currency") if isinstance(salary.get("currency"),str) and len(salary["currency"])==3 else None
@@ -109,14 +119,16 @@ def _insert_job(conn, source_id, board_name: str, raw: dict) -> tuple[bool, obje
              "description":job.description,"canonical_url":job.canonical_url,
              "source":board_name,"external_id":job.external_id}
     inserted=conn.execute("""INSERT INTO job(id,source_id,company,title,description,city,province,work_mode,
-          employment_type,salary_min,salary_max,currency,canonical_url,external_id,posting_fingerprint,
+          employment_type,salary_min,salary_max,currency,canonical_url,external_id,posting_fingerprint,posted_at,
           description_fingerprint,requirements,source_evidence)
-          VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+          VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
           ON CONFLICT DO NOTHING RETURNING id""",
           (identity,source_id,job.company,job.title,job.description,display_city(job.location),province,
-           scope["work_mode"],employment,salary_min,salary_max,currency,job.canonical_url,job.external_id,job.fingerprint,desc_hash,
+           scope["work_mode"],employment,salary_min,salary_max,currency,job.canonical_url,job.external_id,job.fingerprint,posted_at,desc_hash,
            Jsonb({"category":scope["category"],"region":scope["province"],"scope_reviewed":"TARGET_ROLE_AND_GEOGRAPHY"}),
-           Jsonb({"source":board_name,"untrusted":True,"retrieved_at":datetime.now(timezone.utc).isoformat()}))).fetchone()
+           Jsonb({"source":board_name,"untrusted":True,"retrieved_at":datetime.now(timezone.utc).isoformat(),
+             "posted_at":posted_at.isoformat() if posted_at else None,
+             "source_location":raw.get("source_location")}))).fetchone()
     if not inserted:
         return False, None
     conn.execute("INSERT INTO job_snapshot(id,job_id,content_hash,content) VALUES (%s,%s,%s,%s)",

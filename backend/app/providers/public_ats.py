@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from html import unescape
 import json
 import re
+from datetime import datetime, timezone
 
 import httpx
 
@@ -88,6 +89,7 @@ class PublicATSProvider:
             work_mode = None
             employment_type = None
             salary = None
+            posted_at = item.get("first_published") or item.get("updated_at")
         else:
             categories = item.get("categories") or {}
             location = categories.get("location") or ", ".join(categories.get("allLocations") or []) or "Unspecified"
@@ -98,15 +100,31 @@ class PublicATSProvider:
             work_mode = (item.get("workplaceType") or "").replace("on-site", "On-site").replace("hybrid", "Hybrid").replace("remote", "Remote") or None
             employment_type = (item.get("categories") or {}).get("commitment")
             salary = item.get("salaryRange")
+            created_at = item.get("createdAt")
+            try:
+                posted_at = datetime.fromtimestamp(int(created_at) / 1000, timezone.utc).isoformat() if created_at else None
+            except (TypeError, ValueError, OverflowError, OSError):
+                posted_at = None
         if not isinstance(url,str) or not url.startswith("https://"):
             raise ValueError("provider returned a non-HTTPS posting URL")
+        original_location = _plain(str(location),300)
+        normalized_title = _plain(str(title),300)
+        # Some ATS boards expose a continent-wide remote label even when the
+        # posting itself explicitly restricts applicants to Canada. Preserve
+        # the ATS value for evidence and use the narrower eligible region for
+        # matching only when the posting says Canada and Remote.
+        if ("remote" in original_location.casefold()
+                and "canada" in (normalized_title + " " + description).casefold()):
+            location = "Remote Canada"
         return {
             "company": self.board.company_name or self.board.slug,
-            "title": _plain(str(title), 300),
+            "title": normalized_title,
             "url": url[:2000],
             "source": self.board.name,
             "description": description,
             "location": _plain(str(location),300),
+            "source_location": original_location,
+            "posted_at": posted_at,
             "external_id": external_id,
             "work_mode": work_mode,
             "employment_type": employment_type,

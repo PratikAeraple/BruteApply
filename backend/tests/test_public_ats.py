@@ -20,6 +20,29 @@ def test_greenhouse_provider_uses_fixed_https_host_and_normalizes_untrusted_fiel
     assert rows[0]["untrusted"] is True
 
 
+def test_greenhouse_provider_keeps_posting_timestamp_and_canada_remote_evidence():
+    provider=PublicATSProvider(PublicBoard("greenhouse","boards-api.greenhouse.io","acme"),
+        transport=httpx.MockTransport(lambda request:httpx.Response(200,json={"jobs":[{
+            "id":43,"title":"Technical Support Engineer, Canada","location":{"name":"Americas Remote"},
+            "absolute_url":"https://boards.greenhouse.io/acme/jobs/43",
+            "first_published":"2026-10-20T09:00:00-04:00",
+            "content":"<p>This position requires applicants to be located in Canada.</p>"}]})))
+    row=asyncio.run(provider.discover())[0]
+    assert row["location"]=="Remote Canada"
+    assert row["source_location"]=="Americas Remote"
+    assert row["posted_at"]=="2026-10-20T09:00:00-04:00"
+
+
+def test_lever_provider_converts_creation_timestamp_to_utc():
+    provider=PublicATSProvider(PublicBoard("lever","api.lever.co","acme"),
+        transport=httpx.MockTransport(lambda request:httpx.Response(200,json=[{
+            "id":"p2","text":"Junior Technical Support Engineer","hostedUrl":"https://jobs.lever.co/acme/p2",
+            "categories":{"location":"Canada"},"createdAt":1792098347201,
+            "descriptionPlain":"Remote position based in Canada."}])))
+    row=asyncio.run(provider.discover())[0]
+    assert row["posted_at"]=="2026-10-15T21:05:47.201000+00:00"
+
+
 def test_lever_provider_reads_public_json_not_html():
     def handler(request):
         assert "mode=json" in str(request.url)
@@ -54,6 +77,10 @@ def test_target_job_scope_includes_requested_roles_and_regions(title,location,ex
     scope=target_job_scope(title,location)
     assert scope is not None
     assert (scope["province"],scope["work_mode"])==expected
+
+
+def test_target_scope_accepts_technical_solutions_support_role_variant():
+    assert target_job_scope("Technical Solutions Engineer","Toronto, Ontario") is not None
 
 
 @pytest.mark.parametrize("title,location",[
