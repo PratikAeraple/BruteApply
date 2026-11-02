@@ -113,10 +113,13 @@ def _read_client(path: Path) -> tuple[str,str]:
 
 def _exchange(code: str, verifier: str, client_id: str, client_secret: str, *,
               transport: httpx.BaseTransport | None = None) -> str:
-    request_body=urlencode({"code":code,"client_id":client_id,"client_secret":client_secret,
-      "redirect_uri":REDIRECT_URI,"grant_type":"authorization_code","code_verifier":verifier})
+    request_body={"code":code,"client_id":client_id,"client_secret":client_secret,
+      "redirect_uri":REDIRECT_URI,"grant_type":"authorization_code","code_verifier":verifier}
     try:
         with httpx.Client(timeout=httpx.Timeout(15,connect=5),follow_redirects=False,transport=transport) as client:
+            # Pass form fields as a mapping so httpx emits the form Content-Type;
+            # passing a pre-encoded string through `data=` is deprecated and can
+            # be sent with an incorrect media type by future httpx versions.
             response=client.post(f"https://{OAUTH_HOST}/token",data=request_body)
             if response.url.scheme!="https" or response.url.host!=OAUTH_HOST:
                 raise RuntimeError("Google token endpoint origin validation failed")

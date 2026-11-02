@@ -126,6 +126,8 @@ def test_local_oauth_exchange_scope_validation_is_mocked_and_private():
         assert request.url.host=="oauth2.googleapis.com"
         if request.url.path=="/token":
             assert "client_secret=secret" not in request.url.query.decode()
+            assert request.headers["Content-Type"].startswith("application/x-www-form-urlencoded")
+            assert b"client_secret=secret" in request.content
             return httpx.Response(200,json={"refresh_token":"fake-refresh","access_token":"fake-access"})
         assert request.url.path=="/tokeninfo"
         assert "fake-access" not in request.url.query.decode()
