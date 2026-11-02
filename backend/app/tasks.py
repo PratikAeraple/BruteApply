@@ -48,6 +48,9 @@ celery_app.conf.update(
         "schedule-google-sheets-sync-four-hourly": {
             "task": "bruteapply.sync_google_sheet", "schedule": crontab(minute=0, hour="*/4"),
         },
+        "refresh-cloudflare-access-signing-keys": {
+         "task": "bruteapply.refresh_access_jwks", "schedule": crontab(minute=7, hour="*/6"),
+        },
     },
 )
 
@@ -64,6 +67,23 @@ def _ensure_db() -> None:
         db.start_pool()
     if not db.ready():
         raise RuntimeError("database unavailable")
+
+
+@celery_app.task(name="bruteapply.refresh_access_jwks", bind=True, max_retries=3)
+def refresh_access_jwks_task(self):
+    """Refresh only public Access signing keys from the egress-enabled worker."""
+    _ensure_db()
+    try:
+        from .integrations.access_jwks import refresh_access_jwks
+        key_count=refresh_access_jwks()
+    except Exception:
+        logger.warning("Cloudflare Access signing-key refresh failed")
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=RuntimeError("Access signing-key refresh failed"),
+                             countdown=min(60*(2**self.request.retries),1800))
+        raise RuntimeError("Access signing-key refresh failed") from None
+    logger.info("Cloudflare Access signing-key cache refreshed key_count=%d",key_count)
+    return {"key_count":key_count}
 
 
 def _claim_task(conn, key: str, name: str) -> bool:

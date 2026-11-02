@@ -15,7 +15,7 @@ def test_migration_schema_rate_limit_and_encrypted_profile_against_disposable_po
     url=os.environ["BRUTEAPPLY_TEST_DATABASE_URL"]
     with psycopg.connect(url) as conn:
         tables={row[0] for row in conn.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public'")}
-    expected={"candidate_profile","profile_fact","candidate_fact","job","application","ticket","document","audit_event","agent_configuration","api_rate_limit","worker_job","job_snapshot"}
+    expected={"candidate_profile","profile_fact","candidate_fact","job","application","ticket","document","audit_event","agent_configuration","api_rate_limit","worker_job","job_snapshot","access_jwks_cache"}
     assert expected <= tables
     subject="disposable-test-subject"
     actor=Principal("owner@example.invalid",subject)

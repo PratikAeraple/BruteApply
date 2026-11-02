@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+import json
 import os
 
 from fastapi import HTTPException, Request
 
-from . import config
+from . import config, db
 
 
 @dataclass(frozen=True)
@@ -21,8 +22,26 @@ def _jwk_client():
     import jwt
     if not config.ACCESS_ISSUER:
         raise RuntimeError("Access issuer missing")
-    return jwt.PyJWKClient(config.ACCESS_ISSUER + "/cdn-cgi/access/certs", cache_keys=True,
-                           lifespan=3600, timeout=3)
+
+    class CachedAccessKeyClient:
+        """Use the short-lived public JWKS cache; never give the API egress."""
+        def get_signing_key_from_jwt(self, token):
+            header = jwt.get_unverified_header(token)
+            if header.get("alg") != "RS256" or not isinstance(header.get("kid"), str):
+                raise ValueError("unsupported Access signing key")
+            with db.connection() as conn:
+                row = conn.execute("""SELECT jwks FROM access_jwks_cache
+                  WHERE id=1 AND fetched_at > now()-interval '24 hours'""").fetchone()
+            if not row or not isinstance(row["jwks"], dict):
+                raise RuntimeError("Access signing-key cache is stale or unavailable")
+            jwk = next((item for item in row["jwks"].get("keys", [])
+                        if item.get("kid") == header["kid"]), None)
+            if not jwk:
+                raise RuntimeError("Access signing key is not in the current cache")
+            key = jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(jwk))
+            return type("SigningKey", (), {"key": key})()
+
+    return CachedAccessKeyClient()
 
 
 async def require_owner(request: Request) -> Principal:

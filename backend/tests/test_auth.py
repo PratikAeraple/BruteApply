@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import asyncio
+import pytest
 
 from fastapi import HTTPException
 from starlette.requests import Request
@@ -48,3 +49,62 @@ def test_signed_access_assertion_requires_exact_identity(monkeypatch):
         assert False,"expected owner mismatch rejection"
     except HTTPException as exc:
         assert exc.status_code == 401
+
+
+def test_signed_access_assertion_verifies_with_public_cached_jwks_without_egress(monkeypatch):
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from contextlib import contextmanager
+
+    private=rsa.generate_private_key(public_exponent=65537,key_size=2048)
+    public_jwk=jwt.algorithms.RSAAlgorithm.to_jwk(private.public_key(),as_dict=True)
+    public_jwk.update({"kid":"cached-key","use":"sig","alg":"RS256"})
+    monkeypatch.setattr(config,"DEMO_MODE",False)
+    monkeypatch.setattr(config,"ACCESS_ISSUER","https://team.cloudflareaccess.com")
+    monkeypatch.setattr(config,"ACCESS_AUD","bruteapply-audience")
+    monkeypatch.setattr(config,"OWNER_EMAIL","owner@example.com")
+    @contextmanager
+    def connection():
+        class Conn:
+            def execute(self,query):
+                assert "access_jwks_cache" in query and "24 hours" in query
+                return self
+            def fetchone(self): return {"jwks":{"keys":[public_jwk]}}
+        yield Conn()
+    monkeypatch.setattr(auth.db,"connection",connection)
+    auth._jwk_client.cache_clear()
+    claims={"iss":config.ACCESS_ISSUER,"aud":[config.ACCESS_AUD],"sub":"owner-subject",
+            "email":"owner@example.com","iat":datetime.now(timezone.utc),
+            "exp":datetime.now(timezone.utc)+timedelta(minutes=2)}
+    token=jwt.encode(claims,private,algorithm="RS256",headers={"kid":"cached-key"})
+    principal=asyncio.run(auth.require_owner(make_request(token)))
+    assert principal.email=="owner@example.com"
+    auth._jwk_client.cache_clear()
+
+
+def test_cached_access_jwks_missing_kid_fails_closed(monkeypatch):
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from contextlib import contextmanager
+
+    private=rsa.generate_private_key(public_exponent=65537,key_size=2048)
+    monkeypatch.setattr(config,"DEMO_MODE",False)
+    monkeypatch.setattr(config,"ACCESS_ISSUER","https://team.cloudflareaccess.com")
+    monkeypatch.setattr(config,"ACCESS_AUD","bruteapply-audience")
+    monkeypatch.setattr(config,"OWNER_EMAIL","owner@example.com")
+    @contextmanager
+    def connection():
+        class Conn:
+            def execute(self,query): return self
+            def fetchone(self): return {"jwks":{"keys":[]}}
+        yield Conn()
+    monkeypatch.setattr(auth.db,"connection",connection)
+    auth._jwk_client.cache_clear()
+    claims={"iss":config.ACCESS_ISSUER,"aud":[config.ACCESS_AUD],"sub":"owner-subject",
+            "email":"owner@example.com","iat":datetime.now(timezone.utc),
+            "exp":datetime.now(timezone.utc)+timedelta(minutes=2)}
+    token=jwt.encode(claims,private,algorithm="RS256",headers={"kid":"not-cached"})
+    with pytest.raises(HTTPException) as rejected:
+        asyncio.run(auth.require_owner(make_request(token)))
+    assert rejected.value.status_code==401
+    auth._jwk_client.cache_clear()

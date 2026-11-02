@@ -92,6 +92,16 @@ async def readyz():
         return {"status": "ready", "application": "bruteapply-demo"}
     if not db.ready():
         raise HTTPException(503, "not ready")
+    try:
+        with db.connection() as conn:
+            key_cache=conn.execute("""SELECT fetched_at > now()-interval '24 hours' AS fresh
+              FROM access_jwks_cache WHERE id=1""").fetchone()
+        if not key_cache or not key_cache["fresh"]:
+            raise HTTPException(503,"not ready")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(503,"not ready") from None
     return {"status": "ready", "application": "bruteapply", "revision": config.SOURCE_REVISION}
 
 
