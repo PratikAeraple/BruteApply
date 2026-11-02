@@ -163,7 +163,7 @@ async def overview(_: Principal = Depends(_owner)):
       "last_attempt_at":sheet_sync["last_attempt_at"] if sheet_sync else None,
       "rows_mapped":sheet_counts["mapped"],"conflicts":sheet_counts["conflicts"],
       "failed_jobs":sheet_counts["dead_letters"],"retry_count":sheet_sync["retry_count"] if sheet_sync else 0,
-      "dead_letters":sheet_sync["dead_letters"] if sheet_sync else 0,
+      "dead_letters":sheet_sync["dead_letter_count"] if sheet_sync else 0,
       "rows_created":(sheet_last["payload"] or {}).get("rows_created",0) if sheet_last else 0,
       "rows_updated":(sheet_last["payload"] or {}).get("rows_updated",0) if sheet_last else 0,
       "error_category":sheet_sync["error_category"] if sheet_sync else (sheet_integration["last_error_category"] if sheet_integration else None),
