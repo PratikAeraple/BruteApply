@@ -21,6 +21,7 @@ from .domain.jobs import normalize_job
 from .domain.policy import ApplicationState, SubmissionContext, submission_decision, transition
 from .domain.tickets import transition_ticket
 from .domain.profile import merge_profile_facts, validate_profile_facts
+from .domain.application_readiness import readiness_label
 from .domain.fact_review import FactStatus, ResumeFact, can_bulk_transition, validate_resume_fact
 from .domain.sheet_sync import APPLICATION_HEADERS, SYSTEM_OWNED
 from .storage import MAX_UPLOAD_BYTES, load_key_file, safe_display_name, store_private, validate_pdf
@@ -387,19 +388,21 @@ async def application_readiness(_:Principal=Depends(_owner)):
             review=conn.execute("""SELECT evidence FROM application_event WHERE application_id=%s
               AND evidence ? 'readiness_decision' ORDER BY created_at DESC LIMIT 1""",(row["application_id"],)).fetchone()
             document_types={d["document_type"] for d in docs}
+            owner_decision=review["evidence"].get("readiness_decision") if review else None
             ready_checks={"official_posting_link":bool(row["canonical_url"]),
               "private_resume_package":"TAILORED_RESUME" in document_types,
               "owner_questions_cleared":not any(t["category"] in {"MISSING_INFORMATION","SENSITIVE_QUESTION","AMBIGUOUS_ANSWER","DOCUMENT_EXCEPTION"} for t in tickets),
               "no_submission_recorded":row["state"] not in {"SUBMITTED","SUBMISSION_UNVERIFIED","ATTEMPTED","SUBMISSION_ATTEMPTED"}}
             ready=all(ready_checks.values())
+            readiness=readiness_label(ready,owner_decision)
             result.append({"id":row["application_id"],"company":row["company"],"title":row["title"],
               "url":row["canonical_url"],"city":row["city"],"province":row["province"],"work_mode":row["work_mode"],
               "employment_type":row["employment_type"],"salary_min":row["salary_min"],"salary_max":row["salary_max"],
               "currency":row["currency"],"source":row["source"],"state":row["state"],"score":row["score"],
               "confidence":row["confidence"],"matched":row["matched"],"missing":row["missing"],
               "blockers":row["hard_blockers"],"explanation":row["explanation"],"ready_checks":ready_checks,
-              "readiness":"READY_FOR_MANUAL_SUBMISSION" if ready else "NEEDS_REVIEW",
-              "owner_decision":(review["evidence"].get("readiness_decision") if review else None),
+              "readiness":readiness,"can_mark_ready":ready and owner_decision!="READY_FOR_MANUAL_SUBMISSION",
+              "owner_decision":owner_decision,
               "documents":[{**d,"download_url":f"/api/v1/documents/{d['id']}/download"} for d in docs],
               "open_tickets":tickets,"submission_method":"MANUAL_ONLY — employer ATS form; no automated handler is enabled"})
     return {"mode":"PRODUCTION","items":result}

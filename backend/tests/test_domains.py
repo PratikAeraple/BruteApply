@@ -13,11 +13,19 @@ from app.domain.tickets import transition_ticket
 from app.domain.fact_review import FactStatus, ResumeFact, can_bulk_transition, validate_resume_fact
 from app.domain.document_provenance import Claim, validate_claims, validate_generation_inputs
 from app.domain.document_generation import DocumentKind, generate_document
+from app.domain.application_readiness import readiness_label
 from app.integrations.google_sheets import GoogleSheetsSync, SnapshotProof, plan_updates
 from app.domain.email_classification import EmailCategory, classify_email
 from app.domain.submission_handlers import (FakeSubmissionHandler,HandlerCapability,HandlerDeclaration,
                                             handler_decision)
 from app.storage import decrypt_document, encrypt_document, safe_display_name, validate_pdf, store_private_blob
+
+
+def test_manual_readiness_requires_explicit_owner_decision():
+    assert readiness_label(True,None)=="ELIGIBLE_FOR_OWNER_REVIEW"
+    assert readiness_label(False,None)=="NEEDS_REVIEW"
+    assert readiness_label(True,"NEEDS_REVIEW")=="NEEDS_REVIEW"
+    assert readiness_label(True,"READY_FOR_MANUAL_SUBMISSION")=="READY_FOR_MANUAL_SUBMISSION"
 
 
 def test_job_canonicalization_removes_tracking_and_normalizes_scheme():
