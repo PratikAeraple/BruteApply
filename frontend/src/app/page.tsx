@@ -15,8 +15,25 @@ const nav:NavItem[] = [
   {id:"profile",label:"My profile",icon:"○"},{id:"resumes",label:"Resume manager",icon:"▱"},
   {id:"integrations",label:"Integrations",icon:"⤴"},{id:"analytics",label:"Analytics",icon:"⌁"},
   {id:"agents",label:"Agent control",icon:"◉"},{id:"audit",label:"Audit log",icon:"≋"},
-  {id:"health",label:"System health",icon:"♡"},
+  {id:"health",label:"System health",icon:"♡"},{id:"guide",label:"Getting started",icon:"?"},
 ];
+
+const tourSteps=[
+  {id:"overview",title:"Overview",body:"Start here for live job, application, ticket, worker, and integration counts. Production values come from the private API; demo values are synthetic and isolated."},
+  {id:"jobs",title:"Job Explorer",body:"Review source, location, fit, gaps, and the employer’s official posting. A match score is a screening aid, not a hiring probability."},
+  {id:"readiness",title:"Application Ready",body:"Inspect private documents, unresolved questions, and the submission method. Current postings are manual-only; nothing here submits an application."},
+  {id:"resumes",title:"Resume Manager",body:"The canonical resume and tailored materials stay in encrypted private storage. Open and review the latest job-linked version before use."},
+  {id:"tickets",title:"Ticket Center",body:"Resolve only what you can verify. Tickets capture missing information, manual steps, restricted flows, and conflicts. Decisions do not pretend an employer action occurred."},
+  {id:"pipeline",title:"Pipeline",body:"Track each opportunity’s actual stage. A Sheet edit or an attempted action is not proof that an application was submitted."},
+  {id:"integrations",title:"Google Sheets",body:"PostgreSQL is operational source of truth and the existing tracker synchronizes with change detection, conflict handling, and formula preservation. Check the live connection and last sync here."},
+  {id:"integrations",title:"AI configuration",body:"Production AI is not configured. Deterministic evidence-based preparation remains available; paid AI stays off until durable token and cost budgets are implemented."},
+  {id:"agents",title:"Agent Control",body:"Discovery and review can run independently. Real submission is disabled because no permitted employer handler is configured."},
+  {id:"agents",title:"Emergency Stop",body:"The persistent emergency stop blocks new submission work. Keep it enforced until a real permitted adapter, candidate answers, tests, and an attended activation flow exist."},
+  {id:"audit",title:"History and evidence",body:"Use the audit log and application events to see what actually changed. SUBMITTED requires reliable employer-side confirmation evidence."},
+];
+
+type GuideStatus={profile:string;documents:string;sheets:string;adapters:string;dryRun:string;activation:string;emergency:string;openJobs:number;readyApps:number};
+const emptyGuideStatus:GuideStatus={profile:"CHECKING",documents:"CHECKING",sheets:"CHECKING",adapters:"NOT IMPLEMENTED",dryRun:"NOT VERIFIED",activation:"DISABLED",emergency:"CHECKING",openJobs:0,readyApps:0};
 
 const demoJobs:Job[] = [
   {id:"demo-job-01",company:"Northwind Community Services",title:"IT Support Technician",city:"Toronto",province:"Ontario",work_mode:"Hybrid",category:"L1 / Help Desk",score:88,confidence:.79,matched:["Support","Linux","Networking"],missing:["Active Directory"],blockers:[],action:"REVIEW",source:"Company Website",posted:"Oct 27",url:"https://example.invalid/jobs/it-support-01"},
@@ -59,6 +76,8 @@ export default function Home() {
   const [workerStates,setWorkerStates] = useState<Record<string,string>>(demoBuild?defaultOverview.workers:productionOverview.workers);
   const [apiUnavailable,setApiUnavailable] = useState(!demoBuild);
   const [toast,setToast] = useState("");
+  const [tourStep,setTourStep]=useState<number|null>(null);
+  const [guideStatus,setGuideStatus]=useState<GuideStatus>(demoBuild?{...emptyGuideStatus,profile:"SYNTHETIC DEMO",documents:"SYNTHETIC DEMO",sheets:"NOT CONNECTED",emergency:"ENFORCED IN DEMO",openJobs:demoJobs.length,readyApps:0}:emptyGuideStatus);
 
   useEffect(()=>{
     Promise.all([
@@ -79,6 +98,23 @@ export default function Home() {
     }).catch(()=>{ if(!demoBuild) setApiUnavailable(true); });
   },[]);
 
+  useEffect(()=>{
+    if(demoBuild)return;
+    let cancelled=false;
+    Promise.all([
+      fetch("/api/v1/profile",{cache:"no-store"}),fetch("/api/v1/applications/readiness",{cache:"no-store"}),fetch("/api/v1/integrations/google-sheets",{cache:"no-store"}),fetch("/api/v1/overview",{cache:"no-store"}),
+    ]).then(async ([profile,readiness,sheets,overviewResponse])=>{
+      if(!profile.ok||!readiness.ok||!sheets.ok||!overviewResponse.ok)throw new Error("readiness unavailable");
+      const [p,r,g,o]=await Promise.all([profile.json(),readiness.json(),sheets.json(),overviewResponse.json()]);
+      if(cancelled)return;
+      const items=Array.isArray(r.items)?r.items:[];
+      const docCount=items.filter((item:Record<string,unknown>)=>Array.isArray(item.documents)&&item.documents.some((d:Record<string,unknown>)=>["TAILORED_RESUME","COVER_LETTER"].includes(String(d.document_type)))).length;
+      const emergency=String(o.workers?.submission||"").toUpperCase();
+      setGuideStatus({profile:p.configured?`${Number(p.verified_count||0)} verified · ${Number(p.pending_count||0)} pending review`:"NOT CONFIGURED",documents:`${docCount} job packages with a resume`,sheets:String(g.state||"UNKNOWN").toUpperCase(),adapters:"NO PERMITTED REAL SUBMISSION ADAPTER",dryRun:"NO REAL EMPLOYER DRY-RUN",activation:"DISABLED",emergency:emergency.includes("EMERGENCY")||emergency==="PAUSED"?"ENFORCED":"VERIFY IN AGENT CONTROL",openJobs:Number(o.counts?.discovered||0),readyApps:items.filter((item:Record<string,unknown>)=>item.readiness==="READY_FOR_MANUAL_SUBMISSION").length});
+    }).catch(()=>{if(!cancelled)setGuideStatus({...emptyGuideStatus,profile:"STATUS UNAVAILABLE",documents:"STATUS UNAVAILABLE",sheets:"STATUS UNAVAILABLE",emergency:"VERIFY IN AGENT CONTROL"})});
+    return()=>{cancelled=true};
+  },[]);
+
   useEffect(()=>{document.documentElement.dataset.theme=dark?"dark":"light";try{localStorage.setItem("bruteapply-theme",dark?"dark":"light")}catch{}},[dark]);
   useEffect(()=>{if(!toast)return;const id=setTimeout(()=>setToast(""),2800);return()=>clearTimeout(id)},[toast]);
 
@@ -90,6 +126,8 @@ export default function Home() {
 
   const notify=useCallback((message:string)=>setToast(message),[]);
   function select(id:string){setActive(id);setMobileNav(false)}
+  function beginTour(){setTourStep(0);setActive(tourSteps[0].id);setMobileNav(false)}
+  function advanceTour(next:number){if(next<0){setTourStep(null);return}if(next>=tourSteps.length){setTourStep(null);setActive("guide");return}setTourStep(next);setActive(tourSteps[next].id)}
   async function toggleShortlist(id:string){
     if(overview.mode==="PRODUCTION"){
       const response=await fetch("/api/v1/applications",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({job_id:id})});
@@ -140,12 +178,36 @@ export default function Home() {
         {active==="agents"&&<AgentsPage workers={workerStates} control={controlWorker} emergency={()=>{setWorkerStates(s=>({...s,submission:"EMERGENCY STOP"}));notify("Emergency stop requested; no demo workers run")}} mode={overview.mode} />}
         {active==="audit"&&<AuditPage mode={overview.mode} />}
         {active==="health"&&<HealthPage overview={overview} />}
+        {active==="guide"&&<GettingStartedPage status={guideStatus} mode={overview.mode} onTour={beginTour} onNavigate={select} />}
       </div>
       <footer className="page-footer"><span><i className="live-dot" /> Private workspace · America/Toronto</span><span>BruteApply <b>0.1</b> · <a href="https://github.com/PratikAeraple/BruteApply" target="_blank" rel="noreferrer">Open source ↗</a></span></footer>
     </main>
+    {tourStep!==null&&<section className="tour-guide" role="region" aria-label="BruteApply guided tour" aria-live="polite"><div className="tour-guide-copy"><span className="eyebrow">TAKE A TOUR · {tourStep+1} OF {tourSteps.length}</span><strong>{tourSteps[tourStep].title}</strong><p>{tourSteps[tourStep].body}</p></div><div className="tour-guide-actions"><button className="small-control" onClick={()=>advanceTour(tourStep-1)} disabled={tourStep===0}>Previous</button><button className="button button-primary" onClick={()=>advanceTour(tourStep+1)}>{tourStep===tourSteps.length-1?"Finish tour":"Next"}</button><button className="text-button" onClick={()=>advanceTour(-1)}>Exit tour</button></div></section>}
     {mobileNav&&<button aria-label="Close navigation" className="nav-backdrop" onClick={()=>setMobileNav(false)} />}
     {toast&&<div className="toast" role="status">{toast}</div>}
   </div>;
+}
+
+function GettingStartedPage({status,mode,onTour,onNavigate}:{status:GuideStatus;mode:string;onTour:()=>void;onNavigate:(id:string)=>void}){
+ const checks:[string,string,string][]=[
+  ["Candidate readiness",status.profile,"Review verified facts and unresolved answers in My Profile."],
+  ["Documents",status.documents,"Review job-linked résumé and cover-letter drafts in Resume Manager."],
+  ["Google Sheets",status.sheets,"Check connection and last sync in Integrations."],
+  ["Production AI","NOT CONFIGURED","AI is optional; paid requests are disabled until durable budgets are ready."],
+  ["Submission adapters",status.adapters,"Current ATS public endpoints provide job discovery; employer-side application APIs require employer credentials."],
+  ["End-to-end dry run",status.dryRun,"No fake adapter result is presented as a real employer submission."],
+  ["Autonomous submission",status.activation,"Submission remains disabled. No owner activation control is available while there is no permitted real handler."],
+  ["Emergency Stop",status.emergency,"Inspect Agent Control; this persistent stop blocks new submission work."],
+ ];
+ return <><PageHeading eyebrow="OWNER GUIDE" title="Getting started" subtitle="A guided orientation to the live owner workspace, with readiness taken from authenticated production status." action={<button className="button button-primary" onClick={onTour}>Take a Tour <span>→</span></button>} />
+  <div className="guide-hero panel"><div><span className="eyebrow">HOW BRUTEAPPLY WORKS</span><h2>Discover carefully. Prepare truthfully. Submit only through a permitted path.</h2><p>BruteApply separates job discovery, evidence-backed preparation, owner decisions, and employer submission. A posting appearing here does not mean it has been applied to.</p></div><button className="button button-secondary" onClick={()=>onNavigate("readiness")}>Open Application Ready</button></div>
+  <section className="guide-section"><div className="guide-section-head"><div><span className="eyebrow">APPLICATION AUTOMATION SETUP</span><h2>Live readiness checklist</h2><p>{mode==="DEMO"?"Synthetic demo status; isolated from production data and integrations.":`Authenticated status · ${status.openJobs} tracked jobs · ${status.readyApps} owner-marked manual-ready applications. Candidate values are not shown here.`}</p></div><Badge tone={mode==="DEMO"?"amber":"blue"}>{mode==="DEMO"?"DEMO":"LIVE"}</Badge></div>
+   <div className="guide-checklist">{checks.map(([label,value,description],i)=><article className="panel guide-check" key={label}><span className={`guide-index ${/CONNECTED|VERIFIED|ENFORCED|[0-9]+ job package/i.test(value)?"guide-index-good":""}`}>{i+1}</span><div><strong>{label}</strong><small>{description}</small></div><Badge tone={/CONNECTED|VERIFIED|ENFORCED/i.test(value)?"green":/NOT|DISABLED|UNAVAILABLE/i.test(value)?"amber":"neutral"}>{value}</Badge></article>)}</div>
+  </section>
+  <section className="guide-section"><div className="guide-section-head"><div><span className="eyebrow">WORKSPACE MAP</span><h2>Use each area for its intended decision</h2></div><button className="text-button" onClick={onTour}>Replay the tour ↗</button></div><div className="guide-map">{tourSteps.map((step,i)=><button className="panel guide-map-item" key={`${step.id}-${i}`} onClick={()=>onNavigate(step.id)}><span>{String(i+1).padStart(2,"0")}</span><strong>{step.title}</strong><small>{step.body}</small></button>)}</div></section>
+  <div className="notice notice-warn guide-stop"><span className="notice-mark">!</span><div><strong>Real employer submission is not currently available</strong><p>No real permitted employer-submission adapter is implemented. Lever’s public application endpoint requires a key generated by the employer account; SmartRecruiters Apply requires the employer/partner scope; Greenhouse application APIs are employer-authenticated. Current employer flows remain manual, and the Emergency Stop is enforced.</p></div><button className="button button-secondary" onClick={()=>onNavigate("agents")}>Review Agent Control</button></div>
+  <p className="guide-footnote">Production backup status: DEFERRED / NOT IMPLEMENTED. This guide is informational; tour steps never submit applications.</p>
+ </>;
 }
 
 function PageHeading({eyebrow,title,subtitle,action}:{eyebrow:string;title:string;subtitle:string;action?:React.ReactNode}){return <div className="page-heading"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1><p>{subtitle}</p></div>{action&&<div className="heading-action">{action}</div>}</div>}

@@ -10,6 +10,16 @@ If a platform requires interactive authentication, MFA, CAPTCHA, or disallows au
 
 Submission-handler capability selection is implemented as a fail-closed policy module with a fake adapter for tests only. No real employer handler is enabled. Provider evidence must be idempotent and reliably confirm the submission before application state can become `SUBMITTED`.
 
+## Submission capability audit — 2026-11-02
+
+Production submission adapters: **NONE**. The fake handler is test-only and must never be reported as an employer submission. Existing Greenhouse, Lever, and SmartRecruiters integrations are public posting discovery only.
+
+- Lever documents a candidate application POST, but requires an API key generated from the employer account’s integrations settings; its public postings API is not that key. BruteApply has no employer-issued key or authorization for the currently tracked employers. See the [official Lever Postings API application section](https://github.com/lever/postings-api#apply-to-a-job-posting).
+- Greenhouse’s application creation endpoints are part of its authenticated employer-side APIs. Public job-board access does not grant applicant-submission authorization. See [Greenhouse application creation](https://harvestdocs.greenhouse.io/reference/post_v3-applications) and its [Harvest API](https://docs.greenhouse.io/harvest.html).
+- SmartRecruiters Apply requires the employer/partner `candidate_applications_manage` scope; no such authorization exists in this candidate workspace. See [SmartRecruiters Apply API authorization](https://developers.smartrecruiters.com/changelog/oauth-2-support-apply-api) and [Create a New Candidate Application](https://developers.smartrecruiters.com/reference/createcandidate-1).
+
+Therefore current applications must use the official employer-hosted forms manually. No browser automation has been approved by a platform-specific rule review, and no employer form has passed a real end-to-end dry run. Autonomous submission and its owner activation control remain unavailable. Do not request employer API credentials as if they were candidate credentials; use manual handoff unless the employer explicitly authorizes an appropriate integration.
+
 Email classification is a deterministic, bounded text classifier. Conflicting signals and common prompt-injection instructions become `NEEDS_REVIEW`; email text never triggers tool calls or actions. Gmail and calendar OAuth/runtime workers remain unconfigured.
 ## Scheduled public ATS discovery
 

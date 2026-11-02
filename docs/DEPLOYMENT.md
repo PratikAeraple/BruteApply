@@ -12,14 +12,14 @@ Production images use the full immutable source revision (`BRUTEAPPLY_REVISION`)
 
 - Canonical resume and provenance-linked facts live in private persistent storage; the source PDF is not in Git.
 - Discovery is limited to explicitly configured, reviewed public ATS boards. It does not scrape restricted platforms or submit applications.
-- Google Sheets sync remains disabled until OAuth, a recoverable pre-write snapshot, schema validation and a controlled copy-based test pass.
-- OpenAI, Gmail and Calendar remain disabled until separately configured. Fake AI is test-only.
-- Real autonomous submission is disabled; the persisted emergency stop remains active.
+- Google Sheets is connected through the dedicated Sheets worker; its Sheets-only OAuth credential is mounted only there. Sync history, conflicts and row counts are available through the authenticated integration API.
+- Production OpenAI, Gmail and Calendar remain disabled. Fake AI is test-only. Durable production AI budget accounting is not implemented.
+- Real autonomous submission is disabled; the persisted emergency stop remains active. No real employer-submission adapter is configured.
 - Production backups remain **DEFERRED / NOT IMPLEMENTED**.
 
 ## Validation
 
-Validate with the documented locked backend test image, frontend lint/typecheck/production build, dependency audit, secret/privacy scans, Compose validation, and private service health checks. A public unauthenticated request must receive Cloudflare Access behavior, never the application dashboard. Owner-authenticated browser requests should return production API data; an invalid or missing Access assertion must continue to receive 401 from the API.
+Validate with the documented locked backend test image, frontend lint/typecheck/production build, dependency audit, secret/privacy scans, Compose validation, and private service health checks. A public unauthenticated request must receive Cloudflare Access behavior, never the application dashboard. Owner-authenticated browser requests should return production API data; an invalid or missing Access assertion must continue to receive 401 from the API. The dashboard's Getting Started page reports live readiness and explicitly distinguishes public ATS discovery APIs from employer-authorized submission APIs.
 
 ## Rollback
 

@@ -12,10 +12,11 @@ Job-search work is spread across postings, resumes, applications, follow-ups, re
 
 - FastAPI service with Cloudflare Access JWT validation required outside demo mode.
 - PostgreSQL schema/migrations for profiles, verified facts, jobs, matches, applications, documents, tickets, integrations, workers and audit events.
-- Redis-backed Celery worker and three conservative daily discovery windows with bounded retries and late acknowledgements. Greenhouse/Lever public-board discovery is limited to explicitly configured public boards and requested support roles in the target Canadian regions. OAuth-dependent sync, email/calendar, AI production use and real submission remain gated.
+- Redis-backed Celery workers and three conservative daily discovery windows with bounded retries and late acknowledgements. Greenhouse, Lever and SmartRecruiters public posting discovery is limited to explicitly configured sources and requested Canadian support roles. Google Sheets sync runs through a dedicated least-privilege worker; email/calendar and production AI remain disabled.
 - Deterministic job normalization, fingerprinting, hard-blocker checks and explainable scoring.
 - Safe submission-policy gate: unknown facts, sensitive declarations, access controls, CAPTCHA/MFA, duplicate history or unsupported automation stop the flow and create a ticket.
 - Synthetic-data dashboard for local exploration. Demo mode cannot contact the production database, Google, email, OpenAI or job providers. Production-mode private document generation uses only verbatim provenance-checked facts.
+- Owner dashboard includes a replayable Getting Started guide and live readiness checklist. No real employer-submission adapter is implemented; current tracked employers require manual submission or employer-authorized API credentials unavailable to a candidate.
 - The canonical resume and candidate facts are registered in the private production database and encrypted document volume. They are not present in this repository. No personal profile, real application, document or credential is included here.
 
 ## Architecture
