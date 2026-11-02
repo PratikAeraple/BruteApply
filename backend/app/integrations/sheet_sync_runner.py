@@ -10,6 +10,7 @@ import stat
 import time
 from typing import Any
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 from psycopg.types.json import Jsonb
 
@@ -147,7 +148,15 @@ def _records(conn) -> list[dict[str,Any]]:
 
 def _db_row(record:dict[str,Any]) -> list[Any]:
     row=[None]*32
-    date_found=record["discovered_at"].date().isoformat() if record.get("discovered_at") else None
+    discovered=record.get("discovered_at")
+    if isinstance(discovered,datetime):
+        if discovered.tzinfo is None:
+            discovered=discovered.replace(tzinfo=timezone.utc)
+        date_found=discovered.astimezone(ZoneInfo(config.TIMEZONE)).date().isoformat()
+    elif isinstance(discovered,date):
+        date_found=discovered.isoformat()
+    else:
+        date_found=None
     salary=None
     if record.get("salary_min") is not None or record.get("salary_max") is not None:
         lo=record.get("salary_min");hi=record.get("salary_max")
@@ -318,6 +327,21 @@ def _legacy_date_mismatch(mapping_exists:bool, sheet_url:Any, canonical_url:str,
     return (not mapping_exists and str(sheet_url or "").strip()==canonical_url and 1 in mismatch_fields)
 
 
+def _safe_system_timestamp_refresh(sheet_value:Any,database_value:Any)->bool:
+    """Permit a bounded refresh only for the system-owned timestamp field."""
+    if not isinstance(sheet_value,str) or not isinstance(database_value,str):
+        return False
+    try:
+        sheet_time=datetime.fromisoformat(sheet_value.replace("Z","+00:00"))
+        database_time=datetime.fromisoformat(database_value.replace("Z","+00:00"))
+        if sheet_time.tzinfo is None or database_time.tzinfo is None:
+            return False
+        delta=(database_time.astimezone(timezone.utc)-sheet_time.astimezone(timezone.utc)).total_seconds()
+        return 0 < delta <= 86400
+    except (ValueError,TypeError):
+        return False
+
+
 def run_sync(task_id:str, *, api:GoogleOAuthREST|None=None, max_records:int|None=None) -> dict[str,int]:
     if not SPREADSHEET_ID or len(SPREADSHEET_ID)>200:
         raise RuntimeError("Google Sheets tracker is not configured")
@@ -428,6 +452,21 @@ def run_sync(task_id:str, *, api:GoogleOAuthREST|None=None, max_records:int|None
                         conn.execute("UPDATE sheet_sync_conflict SET state='RESOLVED',resolution='LEGACY_SHEET_VALUE_PRESERVED',resolved_at=now() WHERE application_id=%s AND sheet_id=%s AND state='OPEN'",(app_id,SPREADSHEET_ID))
                     preserved.add(1)
                     remote_conflicts.remove(1)
+                # Last Status Update is explicitly system-owned. A Sheet value
+                # that differs while the database timestamp follows a recorded
+                # application event is a stale projection, not an owner edit.
+                # Resolve only this field and only when both values parse as
+                # timezone-aware/UTC instants; other mismatches stay conflicts.
+                if remote_conflicts == [17] and _safe_system_timestamp_refresh(sheet_row[17],db_row[17]):
+                    _make_conflict(conn,record,row_num,["Last Status Update"],
+                      {"Last Status Update":sheet_row[17]},{"Last Status Update":db_row[17]},key)
+                    conn.execute("""UPDATE sheet_sync_conflict SET state='RESOLVED',
+                      resolution='SYSTEM_OWNED_TIMESTAMP_REFRESH',resolved_at=now()
+                      WHERE application_id=%s AND sheet_id=%s AND state='OPEN'""",(app_id,SPREADSHEET_ID))
+                    conn.execute("""INSERT INTO audit_event(id,actor,action,object_type,object_id,request_id,result,metadata)
+                      VALUES (%s,'sheet-sync','SHEET_SYSTEM_FIELD_REFRESHED','application',%s,%s,'DATABASE_VALUE_APPLIED',%s)""",
+                      (uuid4(),app_id,uuid4(),Jsonb({"field":"Last Status Update","policy":"SYSTEM_OWNED"})))
+                    remote_conflicts.remove(17)
                 remote_conflicts=[i for i in remote_conflicts if i not in preserved]
                 if remote_conflicts and not force_database_wins:
                     fields=[APPLICATION_HEADERS[i] for i in remote_conflicts]

@@ -11,7 +11,7 @@ type NavItem = { id:string; label:string; icon:string; count?:string };
 
 const nav:NavItem[] = [
   {id:"overview",label:"Overview",icon:"◫"},{id:"jobs",label:"Job explorer",icon:"⌕"},
-  {id:"pipeline",label:"Applications",icon:"▤"},{id:"tickets",label:"Tickets & decisions",icon:"◇",count:"2"},
+  {id:"pipeline",label:"Applications",icon:"▤"},{id:"readiness",label:"Application ready",icon:"✓"},{id:"tickets",label:"Tickets & decisions",icon:"◇",count:"2"},
   {id:"profile",label:"My profile",icon:"○"},{id:"resumes",label:"Resume manager",icon:"▱"},
   {id:"integrations",label:"Integrations",icon:"⤴"},{id:"analytics",label:"Analytics",icon:"⌁"},
   {id:"agents",label:"Agent control",icon:"◉"},{id:"audit",label:"Audit log",icon:"≋"},
@@ -131,6 +131,7 @@ export default function Home() {
         {active==="overview"&&<OverviewPage overview={overview} jobs={jobs} tickets={openTickets} workers={workerStates} shortlist={shortlisted} onSelect={select} onOpenJob={()=>select("jobs")} />}
         {active==="jobs"&&<JobsPage jobs={filteredJobs} total={jobs.length} search={search} province={province} setSearch={setSearch} setProvince={setProvince} shortlisted={shortlisted} toggleShortlist={toggleShortlist} notify={notify} />}
         {active==="pipeline"&&<PipelinePage applications={applications} notify={notify} />}
+        {active==="readiness"&&<ApplicationReadyPage mode={overview.mode} notify={notify} />}
         {active==="tickets"&&<TicketsPage tickets={openTickets} decide={decideTicket} />}
         {active==="profile"&&<ProfilePage mode={overview.mode} notify={notify} />}
         {active==="resumes"&&<ResumePage mode={overview.mode} notify={notify} />}
@@ -195,6 +196,25 @@ function PipelinePage({applications,notify}:{applications:ApplicationRow[];notif
       </tbody></table></div>
     </section>
     <div className="notice notice-warn"><span className="notice-mark">ⓘ</span><div><strong>No real submissions have been made</strong><p>Autonomous submission is disabled. Production requires the one-time owner activation checklist, a permitted adapter, and verified answers and documents.</p></div></div>
+  </>;
+}
+
+function ApplicationReadyPage({mode,notify}:{mode:string;notify:(s:string)=>void}){
+  type ReadyJob={id:string;company:string;title:string;url:string;city:string;province:string;work_mode:string;employment_type:string;salary_min:number|null;salary_max:number|null;currency:string|null;source:string;state:string;score:number;confidence:number;matched:string[];missing:string[];blockers:string[];explanation:string;readiness:string;ready_checks:Record<string,boolean>;owner_decision:string|null;documents:{id:string;document_type:string;size_bytes:number;sha256:string;download_url:string}[];open_tickets:{id:string;category:string;state:string;priority:string}[];submission_method:string};
+  const [items,setItems]=useState<ReadyJob[]>([]);const [busy,setBusy]=useState("");
+  const refresh=useCallback(async()=>{if(mode!=="PRODUCTION")return;try{const r=await fetch("/api/v1/applications/readiness",{cache:"no-store"});if(r.ok)setItems((await r.json()).items||[])}catch{}},[mode]);
+  useEffect(()=>{const initial=setTimeout(()=>void refresh(),0);return()=>clearTimeout(initial)},[refresh]);
+  async function decide(id:string,decision:"READY_FOR_MANUAL_SUBMISSION"|"NEEDS_REVIEW"){
+    setBusy(id);try{const r=await fetch(`/api/v1/applications/${id}/readiness`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({decision})});const body=await r.json();if(!r.ok)throw new Error(body.detail||"Review decision was rejected");notify(decision==="READY_FOR_MANUAL_SUBMISSION"?"Marked ready for manual review; no application was sent":"Marked needs review");await refresh()}catch(e){notify(e instanceof Error?e.message:"Readiness update failed")}finally{setBusy("")}
+  }
+  return <><PageHeading eyebrow="OWNER REVIEW · NO SUBMISSION" title="Application ready" subtitle="Review the employer posting, evidence-backed match, private documents and outstanding questions before applying manually." />
+    {mode!=="PRODUCTION"?<div className="panel empty-state">Private application packages are available only in the owner workspace.</div>:items.map(item=>{const doc=(type:string)=>item.documents.find(d=>d.document_type===type);const checks=Object.entries(item.ready_checks);return <article className="panel readiness-card" key={item.id}>
+      <div className="readiness-head"><div><div className="eyebrow">{item.company} · {item.city}{item.province?`, ${item.province}`:""} · {item.work_mode}</div><h2>{item.title}</h2><p>{item.employment_type||"Employment type not stated"}{item.salary_min||item.salary_max?` · ${item.currency||"CAD"} ${item.salary_min??""}–${item.salary_max??""}`:" · Salary not stated"}</p></div><div><Score value={item.score}/><Badge tone={item.readiness==="READY_FOR_MANUAL_SUBMISSION"?"green":"amber"}>{item.readiness.replaceAll("_"," ")}</Badge></div></div>
+      <p>{item.explanation} Confidence {Math.round((item.confidence||0)*100)}%. Source: {item.source}. Status: {item.state}.</p><div className="readiness-checks">{checks.map(([name,ok])=><span key={name}><i>{ok?"✓":"!"}</i>{name.replaceAll("_"," ")}</span>)}</div>
+      <div className="readiness-columns"><section><h3>Match evidence</h3><p><strong>Matched:</strong> {item.matched.join(", ")||"No mapped skills"}</p><p><strong>Gaps:</strong> {item.missing.join(", ")||"None recorded"}</p>{item.blockers.length>0&&<p className="blocker">{item.blockers.join(" · ")}</p>}</section><section><h3>Private documents</h3>{doc("TAILORED_RESUME")?<a className="text-link" href={doc("TAILORED_RESUME")!.download_url}>Preview tailored ATS resume ↗</a>:<p>Tailored resume not prepared.</p>}{doc("COVER_LETTER")?<a className="text-link" href={doc("COVER_LETTER")!.download_url}>Preview cover letter ↗</a>:<p>Cover letter not prepared.</p>}{doc("SCREENING_RESPONSE")?<a className="text-link" href={doc("SCREENING_RESPONSE")!.download_url}>Review screening evidence ↗</a>:<p>Screening answers not prepared.</p>}</section></div>
+      <div className="readiness-footer"><a className="button button-secondary" href={item.url} target="_blank" rel="noreferrer">Open official employer application ↗</a><span>{item.submission_method}</span><div>{item.open_tickets.map(t=><Badge key={t.id} tone="amber">{t.category.replaceAll("_"," ")}</Badge>)}</div></div>
+      <div className="agent-actions"><button className="button button-primary" disabled={busy===item.id||item.readiness!=="READY_FOR_MANUAL_SUBMISSION"} onClick={()=>void decide(item.id,"READY_FOR_MANUAL_SUBMISSION")}>Mark ready for manual submission</button><button className="button button-secondary" disabled={busy===item.id} onClick={()=>void decide(item.id,"NEEDS_REVIEW")}>Needs review</button><small>Readiness is a review flag only. No employer site is submitted to or contacted.</small></div>
+    </article>})}{mode==="PRODUCTION"&&items.length===0&&<div className="panel empty-state">No tracked opportunities are ready for manual review yet.</div>}
   </>;
 }
 
@@ -300,7 +320,7 @@ function ResumePage({mode,notify}:{mode:string;notify:(s:string)=>void}) {
 }
 
 function IntegrationsPage({overview,notify}:{overview:Overview;notify:(s:string)=>void}){
-  type Conflict={id:string;company:string;title:string;fields:string[];created_at:string};
+  type Conflict={id:string;company:string;title:string;fields:string[];created_at:string;sheet_values:Record<string,unknown>;bruteapply_values:Record<string,unknown>;reason:string;recommended_resolution:string;available_actions:string[]};
   const [status,setStatus]=useState<SheetSyncStatus|undefined>(overview.google_sheets);const [conflicts,setConflicts]=useState<Conflict[]>([]);const [busy,setBusy]=useState(false);const [showErrors,setShowErrors]=useState(false);
   const refresh=useCallback(async()=>{try{const [s,c]=await Promise.all([fetch("/api/v1/integrations/google-sheets",{cache:"no-store"}),fetch("/api/v1/integrations/google-sheets/conflicts",{cache:"no-store"})]);if(s.ok)setStatus(await s.json());if(c.ok)setConflicts((await c.json()).items||[])}catch{}},[]);
   useEffect(()=>{if(overview.mode!=="PRODUCTION")return;const initial=setTimeout(()=>void refresh(),0);const timer=setInterval(()=>void refresh(),30000);return()=>{clearTimeout(initial);clearInterval(timer)}},[overview.mode,refresh]);
@@ -313,7 +333,7 @@ function IntegrationsPage({overview,notify}:{overview:Overview;notify:(s:string)
       {status?.error_category&&<p className="notice notice-warn">Latest sync error category: {status.error_category}</p>}{status?.oauth_expiry_warning&&<p className="notice notice-warn">OAuth app is in Testing; Google may expire this refresh authorization after seven days. Publish the OAuth app for durable operation.</p>}
       <div className="agent-actions"><button className="button button-primary" disabled={busy||status?.state==="NOT CONFIGURED"} onClick={()=>void send("/api/v1/integrations/google-sheets/sync")}>Sync Now</button>{status?.paused?<button className="button button-secondary" disabled={busy} onClick={()=>void send("/api/v1/agent/control",{agent:"sheet_sync",action:"START"})}>Resume Sync</button>:<button className="button button-secondary" disabled={busy} onClick={()=>void send("/api/v1/agent/control",{agent:"sheet_sync",action:"PAUSE"})}>Pause Sync</button>}<button className="button button-secondary" onClick={()=>{setShowErrors(v=>!v);void refresh()}}>View Errors ({conflicts.length+Number(status?.failed_jobs||0)})</button></div>
     </div><div className="compat-stats"><span><strong>32</strong> protected columns</span><span><strong>3</strong> preserved tabs</span><span><strong>3</strong> formula columns</span></div></section>
-    {showErrors&&<section className="panel"><PanelTitle eyebrow="SYNC REVIEW" title="Conflicts and failures" />{conflicts.map(c=><div className="health-row" key={c.id}><div><strong>{c.company} · {c.title}</strong><small>{c.fields.join(", ")} · {stamp(c.created_at)}</small></div><button className="small-control" disabled={busy} onClick={()=>void send(`/api/v1/integrations/google-sheets/conflicts/${c.id}/resolve`,{resolution:"DATABASE_WINS"})}>Resolve: database wins</button></div>)}{!conflicts.length&&<p className="muted-note">No unresolved field conflicts.</p>}</section>}
+    {showErrors&&<section className="panel"><PanelTitle eyebrow="SYNC REVIEW" title="Conflicts and failures" />{conflicts.map(c=><article className="health-row conflict-detail" key={c.id}><div><strong>{c.company} · {c.title}</strong><small>{c.fields.join(", ")} · {stamp(c.created_at)}</small><p>{c.reason}</p>{c.fields.map(field=><div className="conflict-values" key={field}><span><small>Current Sheet value</small><strong>{String(c.sheet_values?.[field]??"(blank)")}</strong></span><span><small>Current BruteApply value</small><strong>{String(c.bruteapply_values?.[field]??"(blank)")}</strong></span></div>)}<small>Recommended: {c.recommended_resolution.replaceAll("_"," ")}. For owner-managed conflicts, edit the Sheet value and run Sync Now; system-owned values can be explicitly refreshed from BruteApply.</small></div>{c.available_actions?.includes("USE_BRUTEAPPLY_VALUE")&&<button className="small-control" disabled={busy} onClick={()=>void send(`/api/v1/integrations/google-sheets/conflicts/${c.id}/resolve`,{resolution:"DATABASE_WINS"})}>Use BruteApply value</button>}</article>)}{!conflicts.length&&<p className="muted-note">No unresolved field conflicts.</p>}</section>}
     <div className="integration-list">{items.map(([name,sub,desc,state,icon])=><article className="panel integration-card" key={String(name)}><div className="integration-icon">{icon}</div><div className="integration-info"><h2>{name}<small>{sub}</small></h2><p>{desc}</p><div className="integration-state"><i className="state-dot"/>{state}</div></div><button className="button button-secondary" disabled>Not configured</button></article>)}</div>
   </>;
 }

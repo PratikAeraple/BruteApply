@@ -118,10 +118,31 @@ def test_document_generation_rejects_unproven_claims():
         validate_claims([Claim("Invented claim",("unknown-fact",))],allowed)
     with pytest.raises(ValueError):
         validate_generation_inputs([{"id":"fact-1","text":"Unreviewed","status":"NEEDS_REVIEW"}],resume_active=True)
+    assert validate_generation_inputs([
+      {"id":"public","text":"Supported claim","status":"RESUME_VERIFIED","sensitivity":"NORMAL"},
+      {"id":"legal","text":"Unreviewed work authorization","status":"RESUME_VERIFIED","sensitivity":"LEGAL"},
+    ],resume_active=True)=={"public":"Supported claim"}
     document=generate_document(DocumentKind.ATS_RESUME,[{"id":"fact-1","text":"Supported claim","status":"OWNER_APPROVED","page":1,"section":"PROFILE"}],resume_active=True)
     assert "Supported claim" in document.text and document.provenance[0]["fact_id"]=="fact-1"
     letter=generate_document(DocumentKind.COVER_LETTER,[{"id":"fact-1","text":"Supported claim","status":"OWNER_APPROVED"}],resume_active=True,job_title="Role\nInjected",company="Acme")
     assert "Role Injected" in letter.text and "\nInjected" not in letter.text
+    assert "Dear Hiring Team" in letter.text and "Thank you for your time" in letter.text
+    assert "• Supported claim" in letter.text and letter.provenance[0]["fact_id"]=="fact-1"
+
+
+def test_tailored_resume_uses_verified_source_facts_and_ats_sections_only():
+    facts=[
+      {"id":"name","text":"PRATIK AERAPLE","status":"RESUME_VERIFIED","page":1,"section":"PROFILE"},
+      {"id":"summary","text":"IT professional with hands-on experience in technical support and troubleshooting.","status":"RESUME_VERIFIED","page":1,"section":"PROFILE"},
+      {"id":"skill","text":"Systems & Infrastructure: Linux (Ubuntu), Windows Server, Docker","status":"RESUME_VERIFIED","page":1,"section":"TECHNICAL SKILLS"},
+      {"id":"work","text":"Resolved 150+ system, server, DNS, connectivity, and service incidents using logs and root-cause troubleshooting.","status":"RESUME_VERIFIED","page":1,"section":"TECHNICAL SKILLS"},
+      {"id":"unreviewed","text":"Invented expert claim","status":"NEEDS_REVIEW","page":1,"section":"PROFILE"},
+    ]
+    result=generate_document(DocumentKind.ATS_RESUME,facts,resume_active=True,job_title="Service Desk Analyst")
+    assert result.text.startswith("PRATIK AERAPLE\nTARGET ROLE: Service Desk Analyst")
+    assert "TECHNICAL SKILLS" in result.text and "RELEVANT EXPERIENCE" in result.text
+    assert "Invented expert claim" not in result.text
+    assert {item["fact_id"] for item in result.provenance}=={"name","summary","skill","work"}
 
 
 def test_ticket_resolution_requires_decision():

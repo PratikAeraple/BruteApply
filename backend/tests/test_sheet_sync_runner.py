@@ -5,7 +5,7 @@ import pytest
 
 from app.domain.sheet_sync import APPLICATION_HEADERS, FORMULA_COLUMNS
 from app.integrations.sheet_sync_runner import (
-    _db_row, _find_preformatted_row, _legacy_date_mismatch, _map_status, _metadata_row,
+    _db_row, _find_preformatted_row, _legacy_date_mismatch, _safe_system_timestamp_refresh, _map_status, _metadata_row,
     _owner_fields, _restore_written_cell_formats, _verify_preservation,
 )
 
@@ -86,6 +86,49 @@ def test_database_row_leaves_formulas_and_owner_fields_unwritten():
     assert row[16]=="To Apply"
     assert all(row[index] is None for index in FORMULA_COLUMNS)
     assert row[6] is None and row[31] is None
+
+
+def test_date_found_uses_tracker_local_calendar_day():
+    record={"company":"Example","title":"Support Analyst","state":"QUALIFIED",
+      "canonical_url":"https://jobs.example/1",
+      "discovered_at":datetime(2026,11,3,2,30,tzinfo=timezone.utc),
+      "updated_at":datetime(2026,11,3,2,30,tzinfo=timezone.utc)}
+    # UTC 02:30 is still the previous calendar day in Toronto.
+    assert _db_row(record)[1]=="2026-11-02"
+
+
+def test_only_bounded_forward_timezone_aware_system_timestamp_is_auto_refreshable():
+    assert _safe_system_timestamp_refresh("2026-11-02T21:21:42.373253+00:00",
+                                          "2026-11-02T21:21:55.554776+00:00")
+    assert not _safe_system_timestamp_refresh("2026-11-02T21:21:42+00:00",
+                                               "2026-11-02T16:21:42-05:00")
+    assert not _safe_system_timestamp_refresh("2026-11-02T21:21:42",
+                                               "2026-11-02T21:21:55+00:00")
+    assert not _safe_system_timestamp_refresh("owner edit","2026-11-02T21:21:55+00:00")
+    assert not _safe_system_timestamp_refresh("2026-11-01T21:21:42+00:00",
+                                               "2026-11-02T21:21:55+00:00")
+
+
+def test_multiple_new_rows_and_metadata_identity_remain_distinct():
+    class DynamicMetadataAPI:
+        def __init__(self):self.metadata=[]
+        def search_developer_metadata(self,**kwargs):
+            return [{"developerMetadata":{"metadataId":i+1,"metadataKey":key,"metadataValue":value,
+              "location":{"dimensionRange":{"sheetId":7,"dimension":"ROWS","startIndex":row-1,"endIndex":row}}}}
+              for i,(key,value,row) in enumerate(self.metadata) if key==kwargs["key"] and value==kwargs["value"]]
+    rows=[]
+    for _ in range(4):
+        row=[None]*32
+        for index in FORMULA_COLUMNS:row[index]="=ROW()-1"
+        rows.append(row)
+    reserved=set();api=DynamicMetadataAPI();assigned=[]
+    for i in range(4):
+        app_id=f"application-{i}"
+        row=_find_preformatted_row(rows,reserved);assert row is not None
+        reserved.add(row);assigned.append(row)
+        api.metadata.append(("bruteapply_application_uuid",app_id,row))
+    assert assigned==[2,3,4,5]
+    assert len(set(assigned))==4
 
 
 def test_preservation_allows_only_declared_values_and_never_formula_edits():

@@ -67,6 +67,52 @@ def test_ats_provider_preserves_owner_friendly_company_and_allowed_metadata():
     assert row["salary"]["min"]==60000
 
 
+def test_smartrecruiters_reads_scoped_public_board_and_fetches_only_relevant_details():
+    def handler(request):
+        assert request.url.scheme=="https" and request.url.host=="api.smartrecruiters.com"
+        if request.url.path.endswith("/postings"):
+            return httpx.Response(200,json={"totalFound":1,"content":[{"id":"123","name":"Junior IT Helpdesk Technician",
+              "location":{"fullLocation":"Toronto, ON, Canada"}}]})
+        assert request.url.path.endswith("/postings/123")
+        return httpx.Response(200,json={"id":"123","name":"Junior IT Helpdesk Technician",
+          "releasedDate":"2026-10-01T14:55:19.441Z","applyUrl":"https://jobs.smartrecruiters.com/Example/123-job",
+          "location":{"fullLocation":"Toronto, ON, Canada","remote":False,"hybrid":False},
+          "typeOfEmployment":{"label":"Full-time"},"compensation":{"min":48000,"max":50000,"currency":"CAD"},
+          "jobAd":{"sections":{"jobDescription":{"text":"<p>Supports Windows endpoints and help desk requests.</p>"},
+            "qualifications":{"text":"<p>At least one year in technical support.</p>"}}}})
+    provider=PublicATSProvider(PublicBoard("smartrecruiters","api.smartrecruiters.com","example","Example"),
+      transport=httpx.MockTransport(handler))
+    rows=asyncio.run(provider.discover())
+    assert len(rows)==1
+    assert rows[0]["company"]=="Example" and rows[0]["source"]=="smartrecruiters"
+    assert rows[0]["posted_at"]=="2026-10-01T14:55:19.441Z"
+    assert rows[0]["employment_type"]=="Full-time"
+    assert rows[0]["salary"]["min"]==48000
+    assert "technical support" in rows[0]["description"]
+
+
+def test_smartrecruiters_discards_non_target_roles_before_detail_fetch():
+    calls=[]
+    def handler(request):
+        calls.append(request.url.path)
+        return httpx.Response(200,json={"totalFound":1,"content":[{"id":"999","name":"Nurse","location":{"fullLocation":"Toronto, ON, Canada"}}]})
+    provider=PublicATSProvider(PublicBoard("smartrecruiters","api.smartrecruiters.com","example"),transport=httpx.MockTransport(handler))
+    assert asyncio.run(provider.discover())==[]
+    assert len(calls)==1
+
+
+def test_smartrecruiters_rejects_non_vendor_apply_origin():
+    def handler(request):
+        if request.url.path.endswith("/postings"):
+            return httpx.Response(200,json={"totalFound":1,"content":[{"id":"123","name":"Junior IT Helpdesk Technician",
+              "location":{"fullLocation":"Toronto, ON, Canada"}}]})
+        return httpx.Response(200,json={"id":"123","name":"Junior IT Helpdesk Technician",
+          "applyUrl":"https://attacker.example/collect","location":{"fullLocation":"Toronto, ON, Canada"},
+          "jobAd":{"sections":{"jobDescription":{"text":"Help desk support"}}}})
+    provider=PublicATSProvider(PublicBoard("smartrecruiters","api.smartrecruiters.com","example"),transport=httpx.MockTransport(handler))
+    assert asyncio.run(provider.discover())==[]
+
+
 @pytest.mark.parametrize("title,location,expected",[
     ("IT Support Specialist","Toronto, Ontario Hybrid",("Ontario","Hybrid")),
     ("Product Support Analyst","Kitchener, Ontario; Remote",("Ontario","Remote")),

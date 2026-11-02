@@ -29,7 +29,9 @@ def validate_generation_inputs(facts: list[dict], *, resume_active: bool) -> dic
     if not resume_active:
         raise ValueError("generation requires an active canonical resume")
     allowed = {str(fact["id"]):str(fact["text"]) for fact in facts
-               if fact.get("status") in ALLOWED_FACT_STATUSES and isinstance(fact.get("text"),str)}
+               if fact.get("status") in ALLOWED_FACT_STATUSES
+               and fact.get("sensitivity","NORMAL") not in {"SENSITIVE","LEGAL"}
+               and isinstance(fact.get("text"),str)}
     if not allowed:
         raise ValueError("generation requires verified or owner-approved facts")
     return allowed

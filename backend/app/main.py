@@ -22,6 +22,7 @@ from .domain.policy import ApplicationState, SubmissionContext, submission_decis
 from .domain.tickets import transition_ticket
 from .domain.profile import merge_profile_facts, validate_profile_facts
 from .domain.fact_review import FactStatus, ResumeFact, can_bulk_transition, validate_resume_fact
+from .domain.sheet_sync import APPLICATION_HEADERS, SYSTEM_OWNED
 from .storage import MAX_UPLOAD_BYTES, load_key_file, safe_display_name, store_private, validate_pdf
 from .rate_limit import enforce_owner_limit
 
@@ -278,9 +279,28 @@ async def google_sheets_conflicts(_:Principal=Depends(_owner)):
     if config.DEMO_MODE:return {"items":[]}
     with db.connection() as conn:
         rows=conn.execute("""SELECT c.id::text,c.application_id::text,c.sheet_row,c.fields,c.state,c.created_at,
+          c.sheet_values_ciphertext,c.database_values_ciphertext,
           j.company,j.title FROM sheet_sync_conflict c JOIN application a ON a.id=c.application_id
           JOIN job j ON j.id=a.job_id WHERE c.state='OPEN' ORDER BY c.created_at DESC LIMIT 100""").fetchall()
-    return {"items":rows}
+    from .storage import decrypt_document
+    key=_document_key()
+    items=[]
+    for row in rows:
+        identity=UUID(row["application_id"])
+        try:
+            sheet_values=json.loads(decrypt_document(row["sheet_values_ciphertext"],key,identity))
+            database_values=json.loads(decrypt_document(row["database_values_ciphertext"],key,identity))
+        except Exception:
+            raise HTTPException(503,"Google Sheets conflict evidence could not be opened") from None
+        fields=list(row["fields"] or [])
+        system_only=bool(fields) and all(field in {APPLICATION_HEADERS[i] for i in SYSTEM_OWNED} for field in fields)
+        items.append({"id":row["id"],"application_id":row["application_id"],"sheet_row":row["sheet_row"],
+          "fields":fields,"state":row["state"],"created_at":row["created_at"],"company":row["company"],"title":row["title"],
+          "sheet_values":sheet_values,"bruteapply_values":database_values,
+          "reason":"System-owned tracker fields are refreshed from PostgreSQL; mergeable fields can conflict when both sides changed since the saved baseline.",
+          "recommended_resolution":"BRUTEAPPLY_VALUE" if system_only else "OWNER_REVIEW",
+          "available_actions":["USE_BRUTEAPPLY_VALUE"] if system_only else ["EDIT_SHEET_THEN_SYNC","USE_BRUTEAPPLY_VALUE"]})
+    return {"items":items}
 
 
 class ConflictResolution(BaseModel):
@@ -338,6 +358,75 @@ async def analytics(_: Principal = Depends(_owner)):
 
 class ApplicationCreate(BaseModel):
     job_id: UUID
+
+
+class ApplicationReadinessDecision(BaseModel):
+    decision: Literal["READY_FOR_MANUAL_SUBMISSION","NEEDS_REVIEW"]
+    reason: str | None = Field(default=None,max_length=1000)
+
+
+@app.get("/api/v1/applications/readiness")
+async def application_readiness(_:Principal=Depends(_owner)):
+    if config.DEMO_MODE:return {"mode":"DEMO","items":[]}
+    with db.connection() as conn:
+        rows=conn.execute("""SELECT a.id::text AS application_id,a.state,a.updated_at,j.id::text AS job_id,
+          j.company,j.title,j.canonical_url,j.city,j.province,j.work_mode,j.employment_type,
+          j.salary_min,j.salary_max,j.currency,j.requirements,
+          COALESCE(m.score,0)::int AS score,m.confidence,m.matched,m.missing,m.hard_blockers,m.explanation,
+          s.name AS source FROM application a JOIN job j ON j.id=a.job_id
+          LEFT JOIN job_match m ON m.job_id=j.id AND m.profile_id=a.profile_id
+          LEFT JOIN job_source s ON s.id=j.source_id ORDER BY m.score DESC NULLS LAST,a.updated_at DESC""").fetchall()
+        result=[]
+        for row in rows:
+            docs=conn.execute("""SELECT id::text,document_type,sha256,size_bytes,created_at FROM document
+              WHERE application_id=%s OR (job_id=%s AND application_id IS NULL)
+              ORDER BY created_at DESC""",(row["application_id"],row["job_id"])).fetchall()
+            tickets=conn.execute("""SELECT id::text,category,state,priority FROM ticket
+              WHERE state IN ('OPEN','IN_PROGRESS') AND (application_id=%s OR job_id=%s)
+              ORDER BY created_at""",(row["application_id"],row["job_id"])).fetchall()
+            review=conn.execute("""SELECT evidence FROM application_event WHERE application_id=%s
+              AND evidence ? 'readiness_decision' ORDER BY created_at DESC LIMIT 1""",(row["application_id"],)).fetchone()
+            document_types={d["document_type"] for d in docs}
+            ready_checks={"official_posting_link":bool(row["canonical_url"]),
+              "private_resume_package":"TAILORED_RESUME" in document_types,
+              "owner_questions_cleared":not any(t["category"] in {"MISSING_INFORMATION","SENSITIVE_QUESTION","AMBIGUOUS_ANSWER","DOCUMENT_EXCEPTION"} for t in tickets),
+              "no_submission_recorded":row["state"] not in {"SUBMITTED","SUBMISSION_UNVERIFIED","ATTEMPTED","SUBMISSION_ATTEMPTED"}}
+            ready=all(ready_checks.values())
+            result.append({"id":row["application_id"],"company":row["company"],"title":row["title"],
+              "url":row["canonical_url"],"city":row["city"],"province":row["province"],"work_mode":row["work_mode"],
+              "employment_type":row["employment_type"],"salary_min":row["salary_min"],"salary_max":row["salary_max"],
+              "currency":row["currency"],"source":row["source"],"state":row["state"],"score":row["score"],
+              "confidence":row["confidence"],"matched":row["matched"],"missing":row["missing"],
+              "blockers":row["hard_blockers"],"explanation":row["explanation"],"ready_checks":ready_checks,
+              "readiness":"READY_FOR_MANUAL_SUBMISSION" if ready else "NEEDS_REVIEW",
+              "owner_decision":(review["evidence"].get("readiness_decision") if review else None),
+              "documents":[{**d,"download_url":f"/api/v1/documents/{d['id']}/download"} for d in docs],
+              "open_tickets":tickets,"submission_method":"MANUAL_ONLY — employer ATS form; no automated handler is enabled"})
+    return {"mode":"PRODUCTION","items":result}
+
+
+@app.post("/api/v1/applications/{application_id}/readiness")
+async def record_application_readiness(application_id:UUID,payload:ApplicationReadinessDecision,
+                                      principal:Principal=Depends(_owner)):
+    if config.DEMO_MODE:raise HTTPException(409,"application readiness is unavailable in demo mode")
+    with db.connection() as conn:
+        with conn.transaction():
+            app=conn.execute("SELECT state FROM application WHERE id=%s FOR UPDATE",(application_id,)).fetchone()
+            if not app:raise HTTPException(404,"application not found")
+            if payload.decision=="READY_FOR_MANUAL_SUBMISSION":
+                docs=conn.execute("SELECT DISTINCT document_type FROM document WHERE application_id=%s",(application_id,)).fetchall()
+                blockers=conn.execute("""SELECT category FROM ticket WHERE application_id=%s AND state IN ('OPEN','IN_PROGRESS')
+                  AND category IN ('MISSING_INFORMATION','SENSITIVE_QUESTION','AMBIGUOUS_ANSWER','DOCUMENT_EXCEPTION')""",(application_id,)).fetchall()
+                if "TAILORED_RESUME" not in {d["document_type"] for d in docs} or blockers:
+                    raise HTTPException(409,"required documents or owner decisions are still outstanding")
+                if app["state"] in {"SUBMITTED","SUBMISSION_UNVERIFIED","ATTEMPTED","SUBMISSION_ATTEMPTED"}:
+                    raise HTTPException(409,"application already has submission history")
+            evidence={"readiness_decision":payload.decision,"reason":payload.reason,"submission_performed":False}
+            conn.execute("INSERT INTO application_event(id,application_id,from_state,to_state,actor,evidence) VALUES (%s,%s,%s,%s,%s,%s)",
+              (uuid4(),application_id,app["state"],app["state"],principal.email,Jsonb(evidence)))
+            conn.execute("INSERT INTO audit_event(id,actor,action,object_type,object_id,request_id,result,metadata) VALUES (%s,%s,'APPLICATION_READINESS_REVIEWED','application',%s,%s,%s,%s)",
+              (uuid4(),principal.email,application_id,uuid4(),payload.decision,Jsonb({"submission_performed":False})))
+    return {"id":str(application_id),"decision":payload.decision,"submission_performed":False}
 
 
 @app.post("/api/v1/applications", status_code=201)
@@ -1064,7 +1153,7 @@ async def generate_private_document(payload: DocumentGenerate, principal: Princi
         elif payload.job_id:
             job=conn.execute("SELECT id,title,company FROM job WHERE id=%s",(payload.job_id,)).fetchone()
             if not job: raise HTTPException(404,"job not found")
-        facts=conn.execute("""SELECT id,fact_ciphertext,status,page_number,section,source_kind
+        facts=conn.execute("""SELECT id,fact_ciphertext,status,page_number,section,source_kind,sensitivity
           FROM candidate_fact WHERE profile_id=%s ORDER BY section,page_number,source_ordinal LIMIT 500""",
           (profile["id"],)).fetchall()
     from .storage import decrypt_document
@@ -1073,7 +1162,8 @@ async def generate_private_document(payload: DocumentGenerate, principal: Princi
         try: text=decrypt_document(fact["fact_ciphertext"],key,fact["id"]).decode("utf-8")
         except Exception: raise HTTPException(503,"candidate evidence could not be decrypted") from None
         source_facts.append({"id":str(fact["id"]),"text":text,"status":fact["status"],
-          "page":fact["page_number"],"section":fact["section"],"source":fact["source_kind"]})
+          "page":fact["page_number"],"section":fact["section"],"source":fact["source_kind"],
+          "sensitivity":fact["sensitivity"]})
     variants={
       "A":("Systems / Infrastructure",("linux","windows server","docker","proxmox","zfs","infrastructure","server","monitoring","backup","terraform","network")),
       "B":("L2 / Desktop / Technical",("windows","endpoint","desktop","technical support","troubleshooting","incident","customer support","microsoft 365")),

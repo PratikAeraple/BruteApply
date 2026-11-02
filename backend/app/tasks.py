@@ -234,7 +234,8 @@ def discover_enabled_sources(self):
             cfg=source["configuration"] or {}
             board_name=cfg.get("provider")
             slug=cfg.get("board_slug")
-            host={"greenhouse":"boards-api.greenhouse.io","lever":"api.lever.co"}.get(board_name)
+            host={"greenhouse":"boards-api.greenhouse.io","lever":"api.lever.co",
+                  "smartrecruiters":"api.smartrecruiters.com"}.get(board_name)
             if not host or not isinstance(slug,str):
                 raise ValueError("source configuration is incomplete")
             provider=PublicATSProvider(PublicBoard(board_name,host,slug,cfg.get("company_name")))
