@@ -36,6 +36,7 @@ DOCUMENT_KEY = _secret("DOCUMENT_ENCRYPTION_KEY")
 TIMEZONE = os.getenv("TIMEZONE", "America/Toronto")
 AUTONOMOUS_SUBMISSION_ENABLED = os.getenv("AUTONOMOUS_SUBMISSION_ENABLED", "false").lower() == "true"
 SOURCE_REVISION = os.getenv("SOURCE_REVISION", "unknown")
+GOOGLE_SHEETS_SPREADSHEET_ID = os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID", "")
 
 
 def validate_production_config() -> None:

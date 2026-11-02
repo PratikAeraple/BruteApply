@@ -121,12 +121,45 @@ class GoogleOAuthREST:
             raise RuntimeError("Google Sheets returned an invalid values response")
         return values
 
+    def spreadsheet_export(self, *, spreadsheet_id: str) -> dict[str, Any]:
+        if not spreadsheet_id or len(spreadsheet_id)>200:
+            raise ValueError("spreadsheet identity is invalid")
+        return self._request("GET",f"https://{API_HOST}/v4/spreadsheets/{quote(spreadsheet_id,safe='')}",
+          params={"includeGridData":"true","ranges":["Applications","Dashboard","Lists"],
+            "fields":"spreadsheetId,properties,sheets(properties,data(rowData(values(userEnteredValue,effectiveValue,formattedValue,userEnteredFormat,dataValidation,note))))"})
+
+    def spreadsheet_metadata(self, *, spreadsheet_id: str) -> dict[str, Any]:
+        if not spreadsheet_id or len(spreadsheet_id)>200:
+            raise ValueError("spreadsheet identity is invalid")
+        return self._request("GET",f"https://{API_HOST}/v4/spreadsheets/{quote(spreadsheet_id,safe='')}",
+          params={"includeGridData":"false","fields":"spreadsheetId,properties(title,timeZone),sheets(properties(sheetId,title,index,gridProperties(rowCount,columnCount)))"})
+
     def batch_update(self, *, spreadsheet_id: str, data: list[dict[str,Any]],
                      value_input_option: str) -> None:
         if not data or len(data)>500:
             raise ValueError("Google Sheets update batch is outside the safe size limit")
+        # External job and owner text is untrusted. RAW prevents values beginning
+        # with '=' from being interpreted as formulas in the owner's tracker.
+        if value_input_option != "RAW":
+            raise ValueError("Google Sheets writes must use RAW input mode")
         self._request("POST",f"https://{API_HOST}/v4/spreadsheets/{quote(spreadsheet_id,safe='')}/values:batchUpdate",
-                      json_body={"valueInputOption":value_input_option,"data":data},retries=3)
+                      json_body={"valueInputOption":"RAW","data":data},retries=1)
+
+    def batch_update_requests(self, *, spreadsheet_id: str, requests: list[dict[str,Any]]) -> dict[str,Any]:
+        if not spreadsheet_id or len(spreadsheet_id)>200 or not requests or len(requests)>500:
+            raise ValueError("Sheets structural update is outside safe bounds")
+        return self._request("POST",f"https://{API_HOST}/v4/spreadsheets/{quote(spreadsheet_id,safe='')}:batchUpdate",
+                             json_body={"requests":requests},retries=1)
+
+    def search_developer_metadata(self, *, spreadsheet_id: str, key: str, value: str) -> list[dict[str,Any]]:
+        if not spreadsheet_id or len(spreadsheet_id)>200 or not key or len(key)>100 or len(value)>200:
+            raise ValueError("developer metadata lookup is invalid")
+        response=self._request("POST",f"https://{API_HOST}/v4/spreadsheets/{quote(spreadsheet_id,safe='')}:developerMetadata/search",
+          json_body={"dataFilters":[{"developerMetadataLookup":{"metadataKey":key,"metadataValue":value,"visibility":"DOCUMENT"}}]},retries=1)
+        matches=response.get("matchedDeveloperMetadata",[])
+        if not isinstance(matches,list):
+            raise RuntimeError("Google Sheets metadata response is invalid")
+        return matches
 
     def copy(self, *, file_id: str, name: str) -> dict[str,str]:
         if not file_id or len(file_id)>200 or len(name)>200:

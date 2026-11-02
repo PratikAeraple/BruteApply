@@ -18,3 +18,6 @@
 .page-footer a{text-decoration:underline;text-underline-offset:2px}
 @media(max-width:360px){.notification-button i{right:-1px}}
 .theme-light{--muted:#536579;--subtle:#536579;--blue:#285f9e}
+.sheet-sync-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin:18px 0}
+.sheet-sync-metrics span{padding:10px;border:1px solid var(--line);border-radius:12px;color:var(--muted);font-size:12px}
+.sheet-sync-metrics strong{display:block;margin-top:5px;color:var(--ink);font-size:13px}

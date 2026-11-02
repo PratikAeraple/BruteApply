@@ -33,6 +33,7 @@ celery_app.conf.update(
     task_ignore_result=True, worker_prefetch_multiplier=1,
     broker_transport_options={"visibility_timeout":3600}, result_expires=3600,
     task_default_delivery_mode="persistent",
+    task_routes={"bruteapply.sync_google_sheet":{"queue":"google-sheets"}},
     task_default_retry_delay=60, task_max_retries=5,
     beat_schedule={
         "schedule-permitted-public-discovery-morning": {
@@ -43,6 +44,9 @@ celery_app.conf.update(
         },
         "schedule-permitted-public-discovery-evening": {
             "task": "bruteapply.discover_enabled_sources", "schedule": crontab(minute=15, hour=17),
+        },
+        "schedule-google-sheets-sync-four-hourly": {
+            "task": "bruteapply.sync_google_sheet", "schedule": crontab(minute=0, hour="*/4"),
         },
     },
 )
@@ -246,9 +250,48 @@ def discover_enabled_sources(self):
     return {"state":"SUCCEEDED","sources":len(results),"results":results}
 
 
-@celery_app.task(name="bruteapply.sync_google_sheet")
-def sync_google_sheet():
-    raise RuntimeError("Google Sheets worker is disabled until owner OAuth, snapshot, and mapping validation")
+@celery_app.task(bind=True,name="bruteapply.sync_google_sheet",max_retries=5,default_retry_delay=60)
+def sync_google_sheet(self, max_records: int | None = None):
+    _ensure_db()
+    task_id=str(self.request.id or uuid4())
+    try:
+        with db.connection() as conn:
+            state=conn.execute("SELECT enabled,paused,drain FROM agent_configuration WHERE agent='sheet_sync'").fetchone()
+        if not state or not state["enabled"] or state["paused"]:
+            return {"state":"PAUSED","rows_created":0,"rows_updated":0,"conflicts":0}
+        from .integrations.sheet_sync_runner import run_sync
+        result=run_sync(task_id,max_records=max_records)
+        with db.connection() as conn:
+            with conn.transaction():
+                conn.execute("""INSERT INTO worker_job(id,idempotency_key,task_name,state,attempts,started_at,completed_at,payload)
+                  VALUES (%s,%s,'google_sheet_sync','SUCCEEDED',%s,now(),now(),%s)
+                  ON CONFLICT(idempotency_key) DO UPDATE SET state='SUCCEEDED',attempts=EXCLUDED.attempts,
+                  completed_at=now(),error_category=NULL,payload=EXCLUDED.payload""",
+                  (uuid4(),f"google-sheet:{task_id}",self.request.retries+1,Jsonb(result)))
+        return {"state":"SUCCEEDED",**result}
+    except Exception as exc:
+        category=type(exc).__name__[:80]
+        try:
+            with db.connection() as conn:
+                with conn.transaction():
+                    terminal=self.request.retries>=self.max_retries
+                    conn.execute("""INSERT INTO worker_job(id,idempotency_key,task_name,state,attempts,started_at,
+                      completed_at,error_category) VALUES (%s,%s,'google_sheet_sync',%s,%s,now(),
+                      CASE WHEN %s THEN now() ELSE NULL END,%s)
+                      ON CONFLICT(idempotency_key) DO UPDATE SET state=EXCLUDED.state,attempts=EXCLUDED.attempts,
+                      completed_at=EXCLUDED.completed_at,error_category=EXCLUDED.error_category""",
+                      (uuid4(),f"google-sheet:{task_id}","DEAD_LETTER" if terminal else "RETRY",
+                       self.request.retries+1,terminal,category))
+                    conn.execute("""UPDATE sync_state SET last_attempt_at=now(),retry_count=%s,
+                      dead_letter_count=dead_letter_count+%s,error_category=%s WHERE resource='APPLICATIONS'""",
+                      (self.request.retries+1,1 if terminal else 0,category))
+                    conn.execute("UPDATE integration SET state='ERROR',last_error_category=%s,updated_at=now() WHERE provider='google_sheets'",(category,))
+        except Exception:
+            pass
+        logger.warning("google sheet sync failed category=%s retry=%s",category,self.request.retries)
+        if self.request.retries<self.max_retries:
+            raise self.retry(exc=RuntimeError(category),countdown=min(60*(2**self.request.retries),1800))
+        raise
 
 
 @celery_app.task(name="bruteapply.prepare_documents")

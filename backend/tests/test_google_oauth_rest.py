@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import httpx
 import pytest
@@ -50,6 +51,22 @@ def test_google_rest_redacts_provider_error_body(tmp_path):
         api.get(spreadsheet_id="sheet-id",range="'Applications'!A1:AF1000")
     assert "fake-refresh" not in str(error.value)
     assert "private candidate data" not in str(error.value)
+
+
+def test_google_rest_requires_raw_value_writes_to_block_formula_injection(tmp_path):
+    seen=[]
+    def handler(request):
+        if request.url.host=="oauth2.googleapis.com":
+            return httpx.Response(200,json={"access_token":"fake-access","expires_in":3600})
+        seen.append(request)
+        return httpx.Response(200,json={"totalUpdatedCells":1})
+    api=GoogleOAuthREST(str(_credential_file(tmp_path)),transport=httpx.MockTransport(handler))
+    with pytest.raises(ValueError,match="RAW"):
+        api.batch_update(spreadsheet_id="sheet-id",data=[{"range":"'Applications'!D2","values":[["=IMPORTXML()"]]}],value_input_option="USER_ENTERED")
+    api.batch_update(spreadsheet_id="sheet-id",data=[{"range":"'Applications'!D2","values":[["=IMPORTXML()"]]}],value_input_option="RAW")
+    body=json.loads(seen[-1].content)
+    assert body["valueInputOption"]=="RAW"
+    assert body["data"][0]["values"]==[["=IMPORTXML()"]]
 
 
 def test_oauth_client_requires_private_file_and_loopback_redirect(tmp_path):

@@ -94,6 +94,7 @@ services:
       TIMEZONE: America/Toronto
       AUTONOMOUS_SUBMISSION_ENABLED: "false"
       SOURCE_REVISION: ${BRUTEAPPLY_REVISION:?set full immutable source revision}
+      GOOGLE_SHEETS_SPREADSHEET_ID: ${GOOGLE_SHEETS_SPREADSHEET_ID:?set private tracker identifier}
     secrets: [database_url, document_encryption_key]
     group_add: ["1000"]
     volumes: [documents:/var/lib/bruteapply/documents]
@@ -151,6 +152,51 @@ services:
     cpus: 1.0
     healthcheck:
       test: [CMD-SHELL, 'celery -A app.tasks.celery_app inspect ping --destination="worker@$$HOSTNAME" --timeout=3 2>/dev/null | grep -q pong']
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 30s
+
+  sheets-worker:
+    image: bruteapply-api:${BRUTEAPPLY_REVISION:?set full immutable source revision}
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    command: [celery, -A, app.tasks.celery_app, worker, --loglevel=INFO, --concurrency=1, --queues=google-sheets, --hostname=sheets-worker@%h]
+    environment:
+      <<: *application_environment
+      GOOGLE_OAUTH_CREDENTIAL_FILE: /run/secrets/google_oauth
+      GOOGLE_OAUTH_PUBLISHING_STATUS: ${GOOGLE_OAUTH_PUBLISHING_STATUS:-TESTING}
+      GOOGLE_SHEETS_SPREADSHEET_ID: ${GOOGLE_SHEETS_SPREADSHEET_ID:?set private tracker identifier}
+      GOOGLE_SHEETS_STATE_DIR: /var/lib/bruteapply/private-state
+    secrets: [database_url, document_encryption_key, google_oauth]
+    group_add: ["1000"]
+    volumes:
+      - documents:/var/lib/bruteapply/documents
+      - type: bind
+        source: ${BRUTEAPPLY_SHEETS_STATE_DIR:?set private Google Sheets state directory}
+        target: /var/lib/bruteapply/private-state
+        bind:
+          create_host_path: false
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks: [data, sheets_egress]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=24m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    init: true
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 0.75
+    healthcheck:
+      test: [CMD-SHELL, 'celery -A app.tasks.celery_app inspect ping --destination="sheets-worker@$$HOSTNAME" --timeout=3 2>/dev/null | grep -q pong']
       interval: 30s
       timeout: 6s
       retries: 3
@@ -267,6 +313,11 @@ networks:
     driver: bridge
     driver_opts:
       com.docker.network.bridge.enable_icc: "false"
+  sheets_egress:
+    name: bruteapply-production_sheets_egress
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_icc: "false"
 
 volumes:
   postgres_data:
@@ -283,3 +334,5 @@ secrets:
     file: ${BRUTEAPPLY_SECRET_DIR:?set protected secret directory}/database-url
   document_encryption_key:
     file: ${BRUTEAPPLY_SECRET_DIR:?set protected secret directory}/document-encryption-key
+  google_oauth:
+    file: ${BRUTEAPPLY_SECRET_DIR:?set protected secret directory}/google-oauth.json

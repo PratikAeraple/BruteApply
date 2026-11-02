@@ -109,7 +109,7 @@ class GoogleSheetsSync:
         for update in updates:
             col=_column_letters(update.column_index + 1)
             data.append({"range":f"'Applications'!{col}{update.row_number}","values":[[update.value]]})
-        self.sheets.batch_update(spreadsheet_id=self.spreadsheet_id,data=data,value_input_option="USER_ENTERED")
+        self.sheets.batch_update(spreadsheet_id=self.spreadsheet_id,data=data,value_input_option="RAW")
         return len(updates)
 
 

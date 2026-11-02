@@ -1,19 +1,19 @@
 # Google Sheets integration
 
-The existing spreadsheet is preserved and remains an owner-facing projection; PostgreSQL is intended as the operational source of truth. Existing tabs are `Applications`, `Dashboard`, and `Lists`. The 32 Applications columns and row-derived formulas are captured in `backend/app/domain/sheet_sync.py`.
+PostgreSQL is authoritative. The existing `Applications`, `Dashboard`, and `Lists` tabs are preserved. `Applications` must retain its 32-column contract, row-derived Application ID, and formula-owned Days Since Applied / Days to Follow-up cells.
 
-Formula cells are not part of database write payloads. System-owned values, owner-owned values and conflict-checked mergeable values are explicitly separated. Writes must be sparse to avoid clearing formulas. Sync must be idempotent, cursor-based, retryable with backoff, audited and conflict-visible.
+Production synchronization runs in the dedicated `sheets-worker` Compose service on the `google-sheets` Celery queue. Only that service receives the file-backed Google OAuth secret. The discovery worker, API, frontend and scheduler do not mount it. The worker runs as UID 10001, has no host port or Docker socket, and uses the internal database/Redis network plus a dedicated outbound network. The transport pins requests to Google's OAuth and Sheets API origins.
 
-The current runtime OAuth is **not configured**. `backend/app/integrations/google_oauth_rest.py` implements fixed-origin Sheets values read/write and Drive snapshot calls. Refresh credentials are read only from a mode-0600 runtime file. The owner-attended loopback bootstrap is `backend/scripts/google_oauth_local.py`; it uses PKCE and does not print authorization codes or tokens.
+Stable row identity uses row-bound Google Sheets developer metadata containing the BruteApply application UUID. Canonical job URL matching is only a recovery lookup; visible Application ID and row numbers are not permanent identities. Duplicate URLs, occupied mappings, changed system-owned cells, and stale status changes create encrypted conflict records rather than silent overwrites.
 
-The OAuth scopes are `spreadsheets` and `drive.file`. The Sheets scope is account-wide for spreadsheets; application code pins requests to the configured tracker ID but OAuth itself cannot restrict that scope to one spreadsheet. `drive.file` is narrower and may require the owner to grant the app access to the existing tracker. If the snapshot API cannot copy the existing file with the authorized scope, stop before any Sheet write and resolve the permission through Google's consent/file-access flow. Do not broaden scopes silently.
+Writes are sparse and use `RAW` input mode so untrusted ATS text cannot become formulas. Formula columns, formatting, validation, notes, tabs and unrelated cells are checked against a current full export after writes. Before a row-creating write, the worker encrypts the current export into the private documents volume and verifies it by decrypting and checking its checksum. A private receipt records source identity, timestamp, tabs and checksum. This is a recovery snapshot, not an independent production backup; production backups remain deferred.
 
-A first production write requires a verified native Google Sheets snapshot and read-back validation of the existing Applications, Dashboard, and Lists tabs. The sync adapter requires a `SnapshotProof` for non-dry-run writes, validates the 32-column schema, and emits sparse cell updates that exclude Application ID, Days Since Applied, and Days to Follow-up formulas. Never use a mailbox password or commit OAuth state. No Sheet rows have been written by this project.
+Owner-editable values are encrypted in `sheet_owner_state` and returned only through authenticated BruteApply APIs. A Sheet status of “Applied” becomes `SUBMISSION_UNVERIFIED`; no Sheet value is evidence of a verified submission. Stale edits cannot move advanced application states back to “To Apply”. Conflict resolution is explicit and audited.
 
-## Owner authorization bootstrap
+The worker uses bounded exponential retries, records dead letters without provider response bodies or candidate values, and serializes sync through a PostgreSQL advisory lock. A conservative four-hour schedule runs after a successful controlled first sync.
 
-1. Create or select a Google OAuth client appropriate for an installed/loopback application and allow `http://127.0.0.1:8765/callback` as its redirect URI.
-2. Place the downloaded OAuth client JSON in owner-only local state and set mode `0600`; do not place it in this repository.
-3. Run `python backend/scripts/google_oauth_local.py --oauth-client-file /protected/path/client.json` on the owner's workstation. Review Google's consent screen and grant only the listed BruteApply scopes.
-4. The script creates `~/.local/state/bruteapply/google-oauth.json` with mode `0600`. Provision that file to the private runtime using the approved secret provisioning process. Never paste it into ChatGPT, terminal arguments, documentation, or Git.
-5. Verify read-only access and complete a private backup/snapshot before enabling the first write.
+The OAuth consent screen is External / Testing. Google may expire refresh tokens after seven days in that state for non-basic scopes. In Google Cloud Console, open **Google Auth Platform → Audience**, change **Publishing status** from **Testing** to **In production**, and save. Monitor token refresh afterward. If Google rejects the existing refresh token, run the owner-attended OAuth flow again and replace the credential through the protected BruteHost provisioning process. Never share OAuth values in chat.
+
+## Initial authorization bootstrap
+
+The owner-attended loopback bootstrap is `backend/scripts/google_oauth_local.py`; it uses PKCE and does not print authorization codes or tokens. Provision its output only through the protected runtime-secret process. Never place OAuth state in this repository.

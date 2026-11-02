@@ -45,7 +45,7 @@ DEMO_TICKETS = [
     {"id":"BA-DEMO-1042","category":"SENSITIVE_QUESTION","priority":"HIGH","status":"OPEN","summary":"Employer asks for a sensitive declaration","required_action":"Review the question and provide an approved answer or skip."},
     {"id":"BA-DEMO-1041","category":"MANUAL_SUBMISSION_REQUIRED","priority":"NORMAL","status":"OPEN","summary":"Application provider requires an interactive account step","required_action":"Open the employer site and complete it manually if desired."},
 ]
-RUNNABLE_WORKERS: set[str] = {"discovery"}
+RUNNABLE_WORKERS: set[str] = {"discovery", "sheet_sync"}
 
 
 @asynccontextmanager
@@ -114,6 +114,13 @@ async def overview(_: Principal = Depends(_owner)):
           ORDER BY completed_at DESC LIMIT 1""").fetchone()
         dead_letters=conn.execute("SELECT count(*)::int AS count FROM worker_job WHERE state='DEAD_LETTER'").fetchone()["count"]
         qualified=conn.execute("SELECT count(*)::int AS count FROM job WHERE lifecycle IN ('QUALIFIED','SHORTLISTED','PREPARED')").fetchone()["count"]
+        sheet_integration=conn.execute("SELECT state,last_success_at,last_error_category FROM integration WHERE provider='google_sheets'").fetchone()
+        sheet_sync=conn.execute("SELECT last_success_at,last_attempt_at,retry_count,dead_letter_count,error_category FROM sync_state WHERE resource='APPLICATIONS' ORDER BY last_attempt_at DESC LIMIT 1").fetchone()
+        sheet_counts=conn.execute("""SELECT (SELECT count(*)::int FROM sheet_mapping WHERE sheet_id=%s) AS mapped,
+          (SELECT count(*)::int FROM sheet_sync_conflict WHERE state='OPEN') AS conflicts,
+          (SELECT count(*)::int FROM worker_job WHERE task_name='google_sheet_sync' AND state='DEAD_LETTER') AS dead_letters""",(config.GOOGLE_SHEETS_SPREADSHEET_ID,)).fetchone()
+        sheet_last=conn.execute("SELECT payload FROM worker_job WHERE task_name='google_sheet_sync' AND state='SUCCEEDED' ORDER BY completed_at DESC LIMIT 1").fetchone()
+        sheet_agent=conn.execute("SELECT enabled,paused,drain FROM agent_configuration WHERE agent='sheet_sync'").fetchone()
     result = {"mode":"PRODUCTION", "counts":{"discovered":jobs,"tickets":tickets},
               "components":{"database":"UP","queue":"UNKNOWN","worker":"UNKNOWN"},
               "workers":{},"discovery":{"last_run_state":latest_discovery["state"] if latest_discovery else "NOT RUN",
@@ -150,7 +157,18 @@ async def overview(_: Principal = Depends(_owner)):
         result["components"]["worker"]="UNKNOWN"
         result["worker_count"]=None
     result["backup"] = {"status":"DEFERRED / NOT IMPLEMENTED", "restore_test":"NOT TESTED"}
-    result["integrations"] = {"google_sheets":"NOT CONFIGURED", "email":"NOT CONFIGURED", "ai":"NOT CONFIGURED"}
+    result["integrations"] = {"google_sheets":sheet_integration["state"] if sheet_integration else "NOT CONFIGURED", "email":"NOT CONFIGURED", "ai":"NOT CONFIGURED"}
+    result["google_sheets"]={"state":sheet_integration["state"] if sheet_integration else "NOT CONFIGURED",
+      "last_success_at":sheet_sync["last_success_at"] if sheet_sync else None,
+      "last_attempt_at":sheet_sync["last_attempt_at"] if sheet_sync else None,
+      "rows_mapped":sheet_counts["mapped"],"conflicts":sheet_counts["conflicts"],
+      "failed_jobs":sheet_counts["dead_letters"],"retry_count":sheet_sync["retry_count"] if sheet_sync else 0,
+      "dead_letters":sheet_sync["dead_letters"] if sheet_sync else 0,
+      "rows_created":(sheet_last["payload"] or {}).get("rows_created",0) if sheet_last else 0,
+      "rows_updated":(sheet_last["payload"] or {}).get("rows_updated",0) if sheet_last else 0,
+      "error_category":sheet_sync["error_category"] if sheet_sync else (sheet_integration["last_error_category"] if sheet_integration else None),
+      "enabled":sheet_agent["enabled"] if sheet_agent else False,"paused":sheet_agent["paused"] if sheet_agent else True,
+      "oauth_expiry_warning":os.getenv("GOOGLE_OAUTH_PUBLISHING_STATUS","TESTING").upper()=="TESTING"}
     return result
 
 
@@ -203,9 +221,86 @@ async def applications(_: Principal = Depends(_owner)):
     with db.connection() as conn:
         rows=conn.execute("""SELECT a.id::text,a.state,a.created_at,a.updated_at,a.date_applied,
           j.id::text AS job_id,j.company,j.title,j.city,j.province,j.work_mode,j.canonical_url,
-          m.score,m.confidence FROM application a JOIN job j ON j.id=a.job_id
+          m.score,m.confidence,s.fields_ciphertext AS sheet_owner_ciphertext FROM application a JOIN job j ON j.id=a.job_id
+          LEFT JOIN sheet_owner_state s ON s.application_id=a.id
           LEFT JOIN job_match m ON m.job_id=j.id ORDER BY a.updated_at DESC LIMIT 500""").fetchall()
+    from .storage import decrypt_document
+    result=[];key=_document_key()
+    for row in rows:
+        item=dict(row);blob=item.pop("sheet_owner_ciphertext",None)
+        item["owner_fields"]=json.loads(decrypt_document(blob,key,UUID(item["id"]))) if blob else {}
+        result.append(item)
+    return {"items":result}
+
+
+class GoogleSyncRequest(BaseModel):
+    limit: int | None = Field(default=None, ge=1, le=50)
+
+
+@app.get("/api/v1/integrations/google-sheets")
+async def google_sheets_status(_: Principal = Depends(_owner)):
+    if config.DEMO_MODE:
+        return {"state":"DEMO","last_success_at":None,"rows_mapped":0,"conflicts":0,"failed_jobs":0}
+    with db.connection() as conn:
+        integration=conn.execute("SELECT state,last_success_at,last_error_category FROM integration WHERE provider='google_sheets'").fetchone()
+        sync=conn.execute("SELECT last_success_at,last_attempt_at,retry_count,dead_letter_count,error_category FROM sync_state WHERE resource='APPLICATIONS' ORDER BY last_attempt_at DESC LIMIT 1").fetchone()
+        mapped=conn.execute("SELECT count(*)::int AS n FROM sheet_mapping WHERE sheet_id=%s",(config.GOOGLE_SHEETS_SPREADSHEET_ID,)).fetchone()["n"]
+        conflicts=conn.execute("SELECT count(*)::int AS n FROM sheet_sync_conflict WHERE state='OPEN'").fetchone()["n"]
+        failed=conn.execute("SELECT count(*)::int AS n FROM worker_job WHERE task_name='google_sheet_sync' AND state='DEAD_LETTER'").fetchone()["n"]
+        last=conn.execute("SELECT payload FROM worker_job WHERE task_name='google_sheet_sync' AND state='SUCCEEDED' ORDER BY completed_at DESC LIMIT 1").fetchone()
+        agent=conn.execute("SELECT enabled,paused,drain FROM agent_configuration WHERE agent='sheet_sync'").fetchone()
+    return {"state":integration["state"] if integration else "NOT CONFIGURED",
+      "last_success_at":sync["last_success_at"] if sync else None,"last_attempt_at":sync["last_attempt_at"] if sync else None,
+      "rows_mapped":mapped,"conflicts":conflicts,"failed_jobs":failed,
+      "retry_count":sync["retry_count"] if sync else 0,"dead_letters":sync["dead_letter_count"] if sync else 0,
+      "rows_created":(last["payload"] or {}).get("rows_created",0) if last else 0,
+      "rows_updated":(last["payload"] or {}).get("rows_updated",0) if last else 0,
+      "error_category":sync["error_category"] if sync else (integration["last_error_category"] if integration else None),
+      "enabled":agent["enabled"] if agent else False,"paused":agent["paused"] if agent else True,
+      "oauth_expiry_warning":os.getenv("GOOGLE_OAUTH_PUBLISHING_STATUS","TESTING").upper()=="TESTING"}
+
+
+@app.post("/api/v1/integrations/google-sheets/sync",status_code=202)
+async def google_sheets_sync_now(payload:GoogleSyncRequest,principal:Principal=Depends(_owner)):
+    if config.DEMO_MODE: raise HTTPException(409,"Google Sheets sync is unavailable in demo mode")
+    enforce_owner_limit(principal,"google-sheet-sync",4,3600)
+    with db.connection() as conn:
+        state=conn.execute("SELECT enabled,paused FROM agent_configuration WHERE agent='sheet_sync'").fetchone()
+    if not state or not state["enabled"] or state["paused"]:
+        raise HTTPException(409,"Google Sheets sync is paused; resume it first")
+    from .tasks import celery_app
+    task=celery_app.send_task("bruteapply.sync_google_sheet",kwargs={"max_records":payload.limit} if payload.limit else {},queue="google-sheets")
+    return {"queued":True,"task_id":task.id}
+
+
+@app.get("/api/v1/integrations/google-sheets/conflicts")
+async def google_sheets_conflicts(_:Principal=Depends(_owner)):
+    if config.DEMO_MODE:return {"items":[]}
+    with db.connection() as conn:
+        rows=conn.execute("""SELECT c.id::text,c.application_id::text,c.sheet_row,c.fields,c.state,c.created_at,
+          j.company,j.title FROM sheet_sync_conflict c JOIN application a ON a.id=c.application_id
+          JOIN job j ON j.id=a.job_id WHERE c.state='OPEN' ORDER BY c.created_at DESC LIMIT 100""").fetchall()
     return {"items":rows}
+
+
+class ConflictResolution(BaseModel):
+    resolution: Literal["DATABASE_WINS"]
+
+
+@app.post("/api/v1/integrations/google-sheets/conflicts/{conflict_id}/resolve")
+async def resolve_google_sheets_conflict(conflict_id:UUID,payload:ConflictResolution,principal:Principal=Depends(_owner)):
+    if config.DEMO_MODE:raise HTTPException(409,"conflict resolution is unavailable in demo mode")
+    with db.connection() as conn:
+        with conn.transaction():
+            item=conn.execute("SELECT application_id FROM sheet_sync_conflict WHERE id=%s AND state='OPEN' FOR UPDATE",(conflict_id,)).fetchone()
+            if not item:raise HTTPException(404,"open conflict not found")
+            conn.execute("UPDATE sheet_sync_conflict SET state='RESOLVED',resolution=%s,resolved_at=now() WHERE id=%s",(payload.resolution,conflict_id))
+            conn.execute("UPDATE sheet_mapping SET conflict_state='DATABASE_WINS' WHERE application_id=%s",(item["application_id"],))
+            conn.execute("INSERT INTO audit_event(id,actor,action,object_type,object_id,request_id,result) VALUES (%s,%s,'GOOGLE_SHEET_CONFLICT_RESOLVED','sheet_sync_conflict',%s,%s,%s)",
+              (uuid4(),principal.email,conflict_id,uuid4(),payload.resolution))
+    from .tasks import celery_app
+    celery_app.send_task("bruteapply.sync_google_sheet",queue="google-sheets")
+    return {"resolved":True,"resolution":payload.resolution}
 
 
 @app.get("/api/v1/analytics")
@@ -841,6 +936,11 @@ async def control_agent(payload: dict, principal: Principal = Depends(_owner)):
             if not row: raise HTTPException(503,"agent control state is unavailable")
             conn.execute("INSERT INTO audit_event(id,actor,action,object_type,request_id,result) VALUES (%s,%s,%s,%s,%s,%s)",
                          (uuid4(),principal.email,"AGENT_CONTROL_"+action,"agent_configuration",uuid4(),agent))
+    if agent=="sheet_sync" and action=="START":
+        with db.connection() as conn:
+            prior=conn.execute("SELECT last_success_at FROM sync_state WHERE resource='APPLICATIONS' ORDER BY last_attempt_at DESC LIMIT 1").fetchone()
+        from .tasks import celery_app
+        celery_app.send_task("bruteapply.sync_google_sheet",kwargs={} if prior and prior["last_success_at"] else {"max_records":1},queue="google-sheets")
     return {"agent":agent,"enabled":row["enabled"],"paused":row["paused"],"drain":row["drain"]}
 
 
