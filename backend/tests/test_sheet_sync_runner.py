@@ -5,7 +5,8 @@ import pytest
 
 from app.domain.sheet_sync import APPLICATION_HEADERS, FORMULA_COLUMNS
 from app.integrations.sheet_sync_runner import (
-    _db_row, _legacy_date_mismatch, _map_status, _metadata_row, _owner_fields, _verify_preservation,
+    _db_row, _find_preformatted_row, _legacy_date_mismatch, _map_status, _metadata_row,
+    _owner_fields, _restore_written_cell_formats, _verify_preservation,
 )
 
 
@@ -30,6 +31,23 @@ def _export():
 
 def test_metadata_identity_tracks_row_not_visible_application_id():
     assert _metadata_row(MetadataAPI(),"0fdd6c23-0647-49f7-a3fc-e02638c44518")== (10,42)
+
+
+def test_new_application_rows_are_reserved_once_per_sync():
+    rows=[]
+    for _ in range(3):
+        row=[None]*32
+        for index in FORMULA_COLUMNS:
+            row[index]="=ROW()-1"
+        rows.append(row)
+    reserved=set()
+    first=_find_preformatted_row(rows,reserved)
+    assert first==2
+    reserved.add(first)
+    second=_find_preformatted_row(rows,reserved)
+    assert second==3
+    reserved.add(second)
+    assert _find_preformatted_row(rows,reserved)==4
 
 
 def test_legacy_date_is_preserved_only_for_first_exact_url_association():
@@ -87,3 +105,16 @@ def test_preservation_detects_validation_or_format_changes():
     after["sheets"][0]["data"][0]["rowData"][0]["values"][1]["dataValidation"]={"condition":{"type":"ONE_OF_LIST"}}
     with pytest.raises(RuntimeError,match="format or validation"):
         _verify_preservation(before,after,set())
+
+
+def test_written_cell_format_restoration_is_scoped_to_sync_cells():
+    before=_export();after=deepcopy(before)
+    after["sheets"][0]["data"][0]["rowData"][0]["values"][3]["userEnteredFormat"]={"textFormat":{"bold":True}}
+    class FormatAPI:
+        def __init__(self): self.requests=[]
+        def batch_update_requests(self, **kwargs): self.requests.extend(kwargs["requests"])
+    api=FormatAPI()
+    assert _restore_written_cell_formats(api,before,after,{(0,3)})==1
+    assert api.requests[0]["repeatCell"]["range"]["startColumnIndex"]==3
+    with pytest.raises(RuntimeError,match="outside synchronization"):
+        _restore_written_cell_formats(api,before,after,set())

@@ -178,6 +178,18 @@ def _metadata_row(client:GoogleOAuthREST, app_id:UUID) -> tuple[int|None,int|Non
     return (dim.get("startIndex")+1 if isinstance(dim.get("startIndex"),int) else None,md.get("metadataId"))
 
 
+def _find_preformatted_row(rows:list[list[Any]], reserved:set[int]) -> int|None:
+    """Choose a distinct blank formula row for each newly synchronized record."""
+    for row_number, sheet_row in enumerate(rows, start=2):
+        if row_number in reserved:
+            continue
+        padded=list(sheet_row)+[None]*max(0,32-len(sheet_row))
+        if (all(padded[x] in (None,"") for x in range(32) if x not in FORMULA_COLUMNS)
+                and all(isinstance(padded[x],str) and padded[x].startswith("=") for x in FORMULA_COLUMNS)):
+            return row_number
+    return None
+
+
 def _cell_value(value:Any) -> dict[str,Any]:
     if value is None:return {"stringValue":""}
     if isinstance(value,bool):return {"boolValue":value}
@@ -255,6 +267,38 @@ def _verify_preservation(before:dict[str,Any],after:dict[str,Any],allowed:set[tu
                         raise RuntimeError("formula-controlled cell changed during sync")
 
 
+def _restore_written_cell_formats(client:GoogleOAuthREST,before:dict[str,Any],after:dict[str,Any],
+                                  allowed:set[tuple[int,int]])->int:
+    """Restore only formats in cells this sync wrote, from its fresh snapshot."""
+    requests=[]
+    after_sheets={s.get("properties",{}).get("title"):s for s in after.get("sheets",[])}
+    for sheet in before.get("sheets",[]):
+        props=sheet.get("properties",{});title=props.get("title");current=after_sheets.get(title)
+        if current is None: raise RuntimeError("sheet disappeared during synchronization")
+        before_rows=sheet.get("data",[]);after_rows=current.get("data",[])
+        before_grid=before_rows[0].get("rowData",[]) if before_rows else []
+        after_grid=after_rows[0].get("rowData",[]) if after_rows else []
+        for row_index in range(max(len(before_grid),len(after_grid))):
+            bvalues=before_grid[row_index].get("values",[]) if row_index<len(before_grid) else []
+            avalues=after_grid[row_index].get("values",[]) if row_index<len(after_grid) else []
+            for col_index in range(max(len(bvalues),len(avalues))):
+                b=bvalues[col_index] if col_index<len(bvalues) else {}
+                a=avalues[col_index] if col_index<len(avalues) else {}
+                if b.get("userEnteredFormat")==a.get("userEnteredFormat"): continue
+                if title!="Applications" or (row_index,col_index) not in allowed:
+                    raise RuntimeError("format changed outside synchronization write cells")
+                sheet_id=props.get("sheetId")
+                if not isinstance(sheet_id,int): raise RuntimeError("sheet identity missing during format restore")
+                requests.append({"repeatCell":{"range":{"sheetId":sheet_id,
+                    "startRowIndex":row_index,"endRowIndex":row_index+1,
+                    "startColumnIndex":col_index,"endColumnIndex":col_index+1},
+                    "cell":{"userEnteredFormat":b.get("userEnteredFormat",{})},
+                    "fields":"userEnteredFormat"}})
+    if requests:
+        client.batch_update_requests(spreadsheet_id=SPREADSHEET_ID,requests=requests)
+    return len(requests)
+
+
 def _make_conflict(conn,record,row_number,fields,remote,db_values,key):
     app_id=record["application_id"]
     remote_blob=encrypt_document(_canonical(remote),key,app_id)
@@ -297,7 +341,7 @@ def run_sync(task_id:str, *, api:GoogleOAuthREST|None=None, max_records:int|None
         if max_records is not None:
             if not 1<=max_records<=50: raise ValueError("sync record bound is invalid")
         conflicts=created=updated=0
-        sheet_updates=[];metadata_add=[];plans=[];allowed_changes=set();written_rows=set()
+        sheet_updates=[];metadata_add=[];plans=[];allowed_changes=set();written_rows=set();reserved_rows=set()
         by_url={}
         for i,row in enumerate(rows,start=2):
             url=row[13] if len(row)>13 else None
@@ -320,10 +364,10 @@ def run_sync(task_id:str, *, api:GoogleOAuthREST|None=None, max_records:int|None
             if row_num is None and url_rows: row_num=url_rows[0]
             is_new=False
             if row_num is None:
-                for idx,sheet_row in enumerate(rows,start=2):
-                    padded=list(sheet_row)+[None]*max(0,32-len(sheet_row))
-                    if all(padded[x] in (None,"") for x in range(32) if x not in FORMULA_COLUMNS) and all(isinstance(padded[x],str) and padded[x].startswith("=") for x in FORMULA_COLUMNS):
-                        row_num=idx;is_new=True;break
+                row_num=_find_preformatted_row(rows,reserved_rows)
+                if row_num is not None:
+                    is_new=True
+                    reserved_rows.add(row_num)
                 if row_num is None: raise RuntimeError("no preformatted formula row available; refusing sheet structure changes")
             if row_num<2 or row_num>len(rows)+1: raise RuntimeError("sheet row mapping is outside validated range")
             sheet_row=list(rows[row_num-2]);sheet_row.extend([None]*(32-len(sheet_row)));sheet_row=sheet_row[:32]
@@ -431,6 +475,9 @@ def run_sync(task_id:str, *, api:GoogleOAuthREST|None=None, max_records:int|None
         fresh=client.get(spreadsheet_id=SPREADSHEET_ID,range="'Applications'!A1:AF1000",value_render_option="FORMULA")
         if not fresh or tuple(fresh[0])!=APPLICATION_HEADERS:raise RuntimeError("tracker header changed during synchronization")
         after_export=client.spreadsheet_export(spreadsheet_id=SPREADSHEET_ID)
+        _restore_written_cell_formats(client,snapshot["export"],after_export,allowed_changes)
+        if allowed_changes:
+            after_export=client.spreadsheet_export(spreadsheet_id=SPREADSHEET_ID)
         _verify_preservation(snapshot["export"],after_export,allowed_changes)
         fresh_rows=fresh[1:]
         for record,row_num,metadata_id,owner,old_row,db_row,status_target,is_new in plans:

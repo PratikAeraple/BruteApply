@@ -172,7 +172,7 @@ def _score_new_job(conn, job_id) -> bool:
     extra_missing=[]
     # Never treat an unverified language declaration as satisfied. The job
     # remains visible for review but is kept out of the qualified shortlist.
-    if re.search(r"\bbilingual\b|\bfrench\s+(?:fluency|proficiency)\s+(?:is\s+)?required|\bfluent\s+in\s+french\b",description):
+    if _requires_unverified_french(description):
         blockers.append("French/bilingual requirement is not confirmed by an owner-reviewed profile fact.")
     years=re.search(r"\b(\d{1,2})\+?\s+years?\s+of\s+(?:relevant\s+)?(?:[a-z][a-z /&-]{0,40}\s+)?experience\b",description)
     if years:
@@ -197,6 +197,15 @@ def _score_new_job(conn, job_id) -> bool:
           WHERE id=%s AND lifecycle='QUALIFIED'
           AND NOT EXISTS (SELECT 1 FROM application WHERE application.job_id=job.id)""",(job_id,))
     return True
+
+
+def _requires_unverified_french(description: str) -> bool:
+    return bool(re.search(
+        r"\bbilingual\b|\bfrench\s+(?:fluency|proficiency)\s+(?:is\s+)?required|"
+        r"\bfluent\s+in\s+french\b|\bfluency\s+in\s+french\b|"
+        r"\bfluent\s+in\s+(?:both\s+)?french\s+and\s+english\b",
+        description.casefold(),
+    ))
 
 
 @celery_app.task(name="bruteapply.discover_enabled_sources", bind=True,
