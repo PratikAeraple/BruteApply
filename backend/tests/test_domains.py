@@ -19,6 +19,7 @@ from app.domain.email_classification import EmailCategory, classify_email
 from app.domain.submission_handlers import (FakeSubmissionHandler,HandlerCapability,HandlerDeclaration,
                                             handler_decision)
 from app.storage import decrypt_document, encrypt_document, safe_display_name, validate_pdf, store_private_blob
+from app.main import _is_sensitive_fact
 
 
 def test_manual_readiness_requires_explicit_owner_decision():
@@ -47,6 +48,11 @@ def test_application_ready_selects_newest_paired_private_formats():
          "provenance":{"source_document_id":"orphan"}},
     ]
     assert {row["id"] for row in latest_complete_document_packages(docs)}=={"new-pdf","new-docx"}
+
+
+def test_legal_sponsorship_and_salary_answers_remain_sensitive():
+    assert _is_sensitive_fact("sponsorship_requirement")
+    assert _is_sensitive_fact("salary_expectations")
 
 
 def test_job_canonicalization_removes_tracking_and_normalizes_scheme():

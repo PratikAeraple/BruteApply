@@ -303,7 +303,7 @@ function ProfilePage({mode,notify}:{mode:string;notify:(s:string)=>void}) {
   const groups:[string,[string,string,boolean?][]][]=[
     ["Personal",[["full_name","Name"]]],
     ["Contact",[["contact_email","Contact email",true],["phone","Phone",true]]],
-    ["Work Authorization",[["work_authorization","Owner-approved work authorization",true]]],
+    ["Work Authorization",[["work_authorization","Owner-approved work authorization",true],["sponsorship_requirement","Future employer sponsorship requirement",true]]],
     ["Location & Relocation",[["city","Preferred city"],["province","Province"],["relocation","Relocation preference"],["work_modes","On-site / hybrid / remote preference"]]],
     ["Availability",[["availability","General availability"],["start_date","Available start date"],["time_zone","Working time zone"],["shift_availability","Shift availability",true],["evenings_weekends","Evening / weekend availability",true],["on_call_availability","On-call availability",true],["travel_availability","Travel availability",true]]],
     ["Experience",[["experience_summary","Experience summary"],["years_experience","Relevant years of experience"]]],
@@ -311,7 +311,7 @@ function ProfilePage({mode,notify}:{mode:string;notify:(s:string)=>void}) {
     ["Certifications",[["certifications","Certifications"],["driver_license","Driver's licence, if applicable",true],["language_proficiency","Language proficiency",true]]],
     ["Technical Skills",[["skills","Technical skills"]]],
     ["Projects",[["projects","Verified project experience"]]],
-    ["Preferences",[["target_categories","Target role categories"],["minimum_salary","Minimum salary preference",true]]],
+    ["Preferences",[["target_categories","Target role categories"],["minimum_salary","Minimum salary preference",true],["salary_expectations","Target annual base salary range",true]]],
   ];
   const fields=groups.flatMap(([,items])=>items);
   async function refreshResumeFacts(){
@@ -351,7 +351,7 @@ function ProfilePage({mode,notify}:{mode:string;notify:(s:string)=>void}) {
   const resumeVerifiedCount=resumeFacts.filter(item=>item.status==="RESUME_VERIFIED").length;
   const resumeReviewCount=resumeFacts.filter(item=>item.status==="NEEDS_REVIEW").length;
   const structuredProfileCount=Object.values(facts).filter(value=>String(value||"").trim()).length;
-  const ownerAnswerFields=["city","province","work_modes","work_authorization","relocation","availability","start_date","shift_availability","evenings_weekends","on_call_availability","travel_availability","driver_license","language_proficiency"];
+  const ownerAnswerFields=["city","province","work_modes","work_authorization","sponsorship_requirement","relocation","availability","start_date","shift_availability","evenings_weekends","on_call_availability","travel_availability","driver_license","language_proficiency","salary_expectations"];
   const ownerAnswerLabels=new Map(fields.map(([key,label])=>[key,label]));
   const missingOwnerAnswers=ownerAnswerFields.filter(key=>!String(facts[key]||"").trim());
   return <><PageHeading eyebrow="VERIFIED CANDIDATE FACTS" title="My profile" subtitle="Only owner-reviewed facts can be used in applications." />

@@ -830,14 +830,14 @@ async def configure_public_ats(payload: PublicATSConfiguration, principal: Princ
             "terms_reviewed":True,"external_requests":False if not row["enabled"] else "scheduled"}
 
 
-SENSITIVE_FACTS = {"work_authorization", "immigration_status", "disability", "medical", "race", "ethnicity",
+SENSITIVE_FACTS = {"work_authorization", "sponsorship_requirement", "immigration_status", "disability", "medical", "race", "ethnicity",
                    "religion", "gender_identity", "sexual_orientation", "veteran_status", "criminal_history",
                    "security_clearance", "salary_commitment"}
 
 
 def _is_sensitive_fact(key: str) -> bool:
     normalized=key.casefold()
-    sensitive_terms=("work_author", "immigra", "disab", "medical", "race", "ethnic", "relig", "gender",
+    sensitive_terms=("work_author", "sponsor", "immigra", "disab", "medical", "race", "ethnic", "relig", "gender",
                      "sexual", "veteran", "criminal", "security_clearance", "salary")
     return normalized in SENSITIVE_FACTS or any(term in normalized for term in sensitive_terms)
 
