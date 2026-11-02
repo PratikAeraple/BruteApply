@@ -297,9 +297,12 @@ def run_sync(task_id:str, *, api:GoogleOAuthREST|None=None, max_records:int|None
             url=row[13] if len(row)>13 else None
             if url not in (None,""):by_url.setdefault(str(url).strip(),[]).append(i)
         if max_records is not None:
-            # The controlled first write should select an untracked eligible
-            # job when one exists, leaving legacy rows for conflict-aware
-            # association without risking an owner-history overwrite.
+            # Prefer an eligible row without an open conflict so the bounded
+            # first-write probe can establish a clean mapping. Legacy rows
+            # with discrepancies remain queued for explicit conflict review.
+            open_conflicts={r["application_id"] for r in conn.execute(
+              "SELECT DISTINCT application_id FROM sheet_sync_conflict WHERE state='OPEN'").fetchall()}
+            records.sort(key=lambda r:r["application_id"] in open_conflicts)
             records.sort(key=lambda r:bool(by_url.get(r["canonical_url"])))
             records=records[:max_records]
         for record in records:
