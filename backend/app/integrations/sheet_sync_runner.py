@@ -471,7 +471,9 @@ def run_sync(task_id:str, *, api:GoogleOAuthREST|None=None, max_records:int|None
                 # application event is a stale projection, not an owner edit.
                 # Resolve only this field and only when both values parse as
                 # timezone-aware/UTC instants; other mismatches stay conflicts.
-                if remote_conflicts == [17] and not timestamp_conflict_audited and _safe_system_timestamp_refresh(sheet_row[17],db_row[17]):
+                if remote_conflicts == [17] and timestamp_conflict_audited:
+                    remote_conflicts.remove(17)
+                elif remote_conflicts == [17] and _safe_system_timestamp_refresh(sheet_row[17],db_row[17]):
                     _make_conflict(conn,record,row_num,["Last Status Update"],
                       {"Last Status Update":sheet_row[17]},{"Last Status Update":db_row[17]},key)
                     conn.execute("""UPDATE sheet_sync_conflict SET state='RESOLVED',
