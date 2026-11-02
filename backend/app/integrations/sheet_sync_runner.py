@@ -420,7 +420,6 @@ def run_sync(task_id:str, *, api:GoogleOAuthREST|None=None, max_records:int|None
                 if not any(update["range"]==cell_range for update in sheet_updates):
                     sheet_updates.append({"range":cell_range,"values":[[record["canonical_url"]]]})
                     allowed_changes.add((row_num-1,13))
-                    written_rows.add(row_num)
             plans.append((record,row_num,metadata_id,owner,sheet_row,db_row,status_target,is_new))
         if metadata_add:
             client.batch_update_requests(spreadsheet_id=SPREADSHEET_ID,requests=metadata_add)
