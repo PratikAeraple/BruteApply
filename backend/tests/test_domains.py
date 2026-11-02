@@ -13,7 +13,7 @@ from app.domain.tickets import transition_ticket
 from app.domain.fact_review import FactStatus, ResumeFact, can_bulk_transition, validate_resume_fact
 from app.domain.document_provenance import Claim, validate_claims, validate_generation_inputs
 from app.domain.document_generation import DocumentKind, generate_document
-from app.domain.application_readiness import readiness_label
+from app.domain.application_readiness import readiness_label, latest_complete_document_packages
 from app.integrations.google_sheets import GoogleSheetsSync, SnapshotProof, plan_updates
 from app.domain.email_classification import EmailCategory, classify_email
 from app.domain.submission_handlers import (FakeSubmissionHandler,HandlerCapability,HandlerDeclaration,
@@ -26,6 +26,27 @@ def test_manual_readiness_requires_explicit_owner_decision():
     assert readiness_label(False,None)=="NEEDS_REVIEW"
     assert readiness_label(True,"NEEDS_REVIEW")=="NEEDS_REVIEW"
     assert readiness_label(True,"READY_FOR_MANUAL_SUBMISSION")=="READY_FOR_MANUAL_SUBMISSION"
+
+
+def test_application_ready_selects_newest_paired_private_formats():
+    from datetime import datetime, timezone
+    pdf="application/pdf"
+    docx="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    old=datetime(2026,11,1,tzinfo=timezone.utc)
+    new=datetime(2026,11,2,tzinfo=timezone.utc)
+    docs=[
+        {"id":"old-pdf","document_type":"TAILORED_RESUME","mime_type":pdf,"created_at":old,
+         "provenance":{"source_document_id":"old","variant":"Help Desk"}},
+        {"id":"old-docx","document_type":"TAILORED_RESUME","mime_type":docx,"created_at":old,
+         "provenance":{"source_document_id":"old","variant":"Help Desk"}},
+        {"id":"new-pdf","document_type":"TAILORED_RESUME","mime_type":pdf,"created_at":new,
+         "provenance":{"source_document_id":"new","variant":"Help Desk"}},
+        {"id":"new-docx","document_type":"TAILORED_RESUME","mime_type":docx,"created_at":new,
+         "provenance":{"source_document_id":"new","variant":"Help Desk"}},
+        {"id":"orphan","document_type":"COVER_LETTER","mime_type":pdf,"created_at":new,
+         "provenance":{"source_document_id":"orphan"}},
+    ]
+    assert {row["id"] for row in latest_complete_document_packages(docs)}=={"new-pdf","new-docx"}
 
 
 def test_job_canonicalization_removes_tracking_and_normalizes_scheme():

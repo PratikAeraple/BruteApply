@@ -22,7 +22,7 @@ from .domain.jobs import normalize_job
 from .domain.policy import ApplicationState, SubmissionContext, submission_decision, transition
 from .domain.tickets import transition_ticket
 from .domain.profile import merge_profile_facts, validate_profile_facts
-from .domain.application_readiness import readiness_label
+from .domain.application_readiness import readiness_label, latest_complete_document_packages
 from .domain.fact_review import FactStatus, ResumeFact, can_bulk_transition, validate_resume_fact
 from .domain.sheet_sync import APPLICATION_HEADERS, SYSTEM_OWNED
 from .storage import MAX_UPLOAD_BYTES, load_key_file, safe_display_name, store_private, validate_pdf
@@ -392,13 +392,16 @@ async def application_readiness(_:Principal=Depends(_owner)):
         for row in rows:
             docs=conn.execute("""SELECT id::text,document_type,sha256,size_bytes,created_at,mime_type,provenance FROM document
               WHERE application_id=%s OR (job_id=%s AND application_id IS NULL)
-              ORDER BY CASE provenance->>'format' WHEN 'pdf' THEN 0 WHEN 'docx' THEN 1 ELSE 2 END,created_at DESC""",(row["application_id"],row["job_id"])).fetchall()
-            tickets=conn.execute("""SELECT id::text,category,state,priority FROM ticket
+              ORDER BY created_at DESC""",(row["application_id"],row["job_id"])).fetchall()
+            tickets=conn.execute("""SELECT id::text,category,state,priority,summary_ciphertext,required_action_ciphertext FROM ticket
               WHERE state IN ('OPEN','IN_PROGRESS') AND (application_id=%s OR job_id=%s)
               ORDER BY created_at""",(row["application_id"],row["job_id"])).fetchall()
             review=conn.execute("""SELECT evidence FROM application_event WHERE application_id=%s
               AND evidence ? 'readiness_decision' ORDER BY created_at DESC LIMIT 1""",(row["application_id"],)).fetchone()
-            document_types={d["document_type"] for d in docs}
+            # Use the current source_document_id provenance field to keep
+            # paired formats from the same generation together.
+            selected_docs=latest_complete_document_packages(docs)
+            document_types={d["document_type"] for d in selected_docs}
             owner_decision=review["evidence"].get("readiness_decision") if review else None
             ready_checks={"official_posting_link":bool(row["canonical_url"]),
               "private_resume_package":"TAILORED_RESUME" in document_types,
@@ -406,6 +409,19 @@ async def application_readiness(_:Principal=Depends(_owner)):
               "no_submission_recorded":row["state"] not in {"SUBMITTED","SUBMISSION_UNVERIFIED","ATTEMPTED","SUBMISSION_ATTEMPTED"}}
             ready=all(ready_checks.values())
             readiness=readiness_label(ready,owner_decision)
+            if tickets:
+                from .storage import decrypt_document
+                ticket_key=_document_key()
+                try:
+                    open_tickets=[{"id":ticket["id"],"category":ticket["category"],"state":ticket["state"],
+                      "priority":ticket["priority"],
+                      "summary":decrypt_document(ticket["summary_ciphertext"],ticket_key,UUID(ticket["id"])).decode(),
+                      "required_action":decrypt_document(ticket["required_action_ciphertext"],ticket_key,UUID(ticket["id"])).decode()}
+                      for ticket in tickets]
+                except Exception:
+                    raise HTTPException(503,"private application readiness data unavailable") from None
+            else:
+                open_tickets=[]
             result.append({"id":row["application_id"],"company":row["company"],"title":row["title"],
               "url":row["canonical_url"],"city":row["city"],"province":row["province"],"work_mode":row["work_mode"],
               "employment_type":row["employment_type"],"salary_min":row["salary_min"],"salary_max":row["salary_max"],
@@ -414,8 +430,10 @@ async def application_readiness(_:Principal=Depends(_owner)):
               "blockers":row["hard_blockers"],"explanation":row["explanation"],"ready_checks":ready_checks,
               "readiness":readiness,"can_mark_ready":ready and owner_decision!="READY_FOR_MANUAL_SUBMISSION",
               "owner_decision":owner_decision,
-              "documents":[{**d,"download_url":f"/api/v1/documents/{d['id']}/download"} for d in docs],
-              "open_tickets":tickets,"submission_method":"MANUAL_ONLY — employer ATS form; no automated handler is enabled"})
+              "documents":[{**d,"format":"PDF" if d["mime_type"]=="application/pdf" else "DOCX" if d["mime_type"]=="application/vnd.openxmlformats-officedocument.wordprocessingml.document" else "TEXT",
+                "download_url":f"/api/v1/documents/{d['id']}/download"} for d in selected_docs],
+              "open_tickets":open_tickets,
+              "submission_method":"MANUAL_ONLY — employer ATS form; no automated handler is enabled"})
     return {"mode":"PRODUCTION","items":result}
 
 
@@ -425,12 +443,15 @@ async def record_application_readiness(application_id:UUID,payload:ApplicationRe
     if config.DEMO_MODE:raise HTTPException(409,"application readiness is unavailable in demo mode")
     with db.connection() as conn:
         with conn.transaction():
-            app=conn.execute("SELECT state FROM application WHERE id=%s FOR UPDATE",(application_id,)).fetchone()
+            app=conn.execute("SELECT state,job_id FROM application WHERE id=%s FOR UPDATE",(application_id,)).fetchone()
             if not app:raise HTTPException(404,"application not found")
             if payload.decision=="READY_FOR_MANUAL_SUBMISSION":
-                docs=conn.execute("SELECT DISTINCT document_type FROM document WHERE application_id=%s",(application_id,)).fetchall()
-                blockers=conn.execute("""SELECT category FROM ticket WHERE application_id=%s AND state IN ('OPEN','IN_PROGRESS')
-                  AND category IN ('MISSING_INFORMATION','SENSITIVE_QUESTION','AMBIGUOUS_ANSWER','DOCUMENT_EXCEPTION')""",(application_id,)).fetchall()
+                docs=conn.execute("""SELECT DISTINCT document_type FROM document
+                  WHERE application_id=%s OR (job_id=%s AND application_id IS NULL)""",(application_id,app["job_id"])).fetchall()
+                blockers=conn.execute("""SELECT category FROM ticket WHERE (application_id=%s OR job_id=%s)
+                  AND state IN ('OPEN','IN_PROGRESS')
+                  AND category IN ('MISSING_INFORMATION','SENSITIVE_QUESTION','AMBIGUOUS_ANSWER','DOCUMENT_EXCEPTION')""",
+                  (application_id,app["job_id"])).fetchall()
                 if "TAILORED_RESUME" not in {d["document_type"] for d in docs} or blockers:
                     raise HTTPException(409,"required documents or owner decisions are still outstanding")
                 if app["state"] in {"SUBMITTED","SUBMISSION_UNVERIFIED","ATTEMPTED","SUBMISSION_ATTEMPTED"}:
