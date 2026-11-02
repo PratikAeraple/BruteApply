@@ -91,7 +91,26 @@ def generate_document(kind: DocumentKind, facts: list[dict], *, resume_active: b
 
     lines=[]
     if kind==DocumentKind.SCREENING_PACKAGE:
-        lines.append("Verified source statements for owner review:")
+        # This is an evidence worksheet, never a guessed answer set. Keep it
+        # relevant to the posting and make the owner-review boundary explicit.
+        terms=set(re.findall(r"[a-z0-9+#]+",title.casefold()))
+        def screening_relevance(identity:str)->tuple[int,int,str]:
+            fact=rows[identity];text=evidence[identity].casefold();section=str(fact.get("section"," ")).casefold()
+            score=sum(2 for term in terms if len(term)>2 and term in text)
+            score+=sum(1 for term in ("support","troubleshoot","incident","customer","windows","linux","network","endpoint","documentation") if term in text)
+            score+=2 if section in {"profile","work experience","technical skills"} else 0
+            return (-score,int(fact.get("page") or 0),identity)
+        selected=sorted(ordered,key=screening_relevance)[:8]
+        if not selected:raise ValueError("no eligible evidence is available for screening review")
+        lines.extend((f"Evidence worksheet for {title or 'this role'} at {employer or 'the employer'}",
+          "Owner review required. This is not a completed application answer set.",
+          "Use a statement only if it directly and truthfully answers the employer's question.",
+          "Work authorization, relocation, legal, sensitive, and unknown questions are intentionally unanswered.","",
+          "Relevant verified resume statements:"))
+        lines.extend(f"- {evidence[identity]}" for identity in selected)
+        return GeneratedDocument(kind,"\n".join(lines)+"\n",
+          tuple({"fact_id":identity,"page":rows[identity].get("page"),"section":rows[identity].get("section"),
+                 "source":rows[identity].get("source","canonical-resume")} for identity in selected))
     elif kind==DocumentKind.APPLICATION_SUMMARY:
         lines.append(f"Prepared application: {title or 'Role'} · {employer or 'Employer'}")
     for identity in ordered:

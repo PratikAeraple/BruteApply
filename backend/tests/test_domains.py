@@ -145,6 +145,22 @@ def test_tailored_resume_uses_verified_source_facts_and_ats_sections_only():
     assert {item["fact_id"] for item in result.provenance}=={"name","summary","skill","work"}
 
 
+def test_screening_package_is_relevant_evidence_not_guessed_answers():
+    facts=[
+      {"id":"1","text":"IT professional with hands-on experience in technical support and troubleshooting.","status":"RESUME_VERIFIED","page":1,"section":"Profile"},
+      {"id":"2","text":"Administered and monitored Linux servers and resolved incidents.","status":"RESUME_VERIFIED","page":2,"section":"Work Experience"},
+      {"id":"3","text":"Canadian work authorization is confirmed.","status":"NEEDS_REVIEW","page":2,"section":"Personal"},
+      {"id":"4","text":"Relocation is available.","status":"OWNER_APPROVED","sensitivity":"LEGAL","page":2,"section":"Preferences"},
+    ]
+    package=generate_document(DocumentKind.SCREENING_PACKAGE,facts,resume_active=True,
+      job_title="Technical Support Engineer",company="Example")
+    assert "Owner review required" in package.text
+    assert "not a completed application answer set" in package.text
+    assert facts[0]["text"] in package.text and facts[1]["text"] in package.text
+    assert facts[2]["text"] not in package.text and facts[3]["text"] not in package.text
+    assert {item["fact_id"] for item in package.provenance}=={"1","2"}
+
+
 def test_ticket_resolution_requires_decision():
     with pytest.raises(ValueError):
         transition_ticket("OPEN","RESOLVED")
