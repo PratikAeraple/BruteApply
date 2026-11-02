@@ -110,7 +110,8 @@ export default function Home() {
       const items=Array.isArray(r.items)?r.items:[];
       const docCount=items.filter((item:Record<string,unknown>)=>Array.isArray(item.documents)&&item.documents.some((d:Record<string,unknown>)=>["TAILORED_RESUME","COVER_LETTER"].includes(String(d.document_type)))).length;
       const emergency=String(o.workers?.submission||"").toUpperCase();
-      setGuideStatus({profile:p.configured?`${Number(p.verified_count||0)} verified · ${Number(p.pending_count||0)} pending review`:"NOT CONFIGURED",documents:`${docCount} job packages with a resume`,sheets:String(g.state||"UNKNOWN").toUpperCase(),adapters:"NO PERMITTED REAL SUBMISSION ADAPTER",dryRun:"NO REAL EMPLOYER DRY-RUN",activation:"DISABLED",emergency:emergency.includes("EMERGENCY")||emergency==="PAUSED"?"ENFORCED":"VERIFY IN AGENT CONTROL",openJobs:Number(o.counts?.discovered||0),readyApps:items.filter((item:Record<string,unknown>)=>item.readiness==="READY_FOR_MANUAL_SUBMISSION").length});
+      const verified=Number(p.verified_count||0),pending=Number(p.pending_count||0);
+      setGuideStatus({profile:!p.configured?"NOT CONFIGURED":verified===0?"NEEDS OWNER INPUT":`${verified} verified · ${pending} pending review`,documents:`${docCount} job packages with a resume`,sheets:String(g.state||"UNKNOWN").toUpperCase(),adapters:"NO PERMITTED REAL SUBMISSION ADAPTER",dryRun:"NO REAL EMPLOYER DRY-RUN",activation:"DISABLED",emergency:emergency.includes("EMERGENCY")||emergency==="PAUSED"?"ENFORCED":"VERIFY IN AGENT CONTROL",openJobs:Number(o.counts?.discovered||0),readyApps:items.filter((item:Record<string,unknown>)=>item.readiness==="READY_FOR_MANUAL_SUBMISSION").length});
     }).catch(()=>{if(!cancelled)setGuideStatus({...emptyGuideStatus,profile:"STATUS UNAVAILABLE",documents:"STATUS UNAVAILABLE",sheets:"STATUS UNAVAILABLE",emergency:"VERIFY IN AGENT CONTROL"})});
     return()=>{cancelled=true};
   },[]);
@@ -190,7 +191,7 @@ export default function Home() {
 
 function GettingStartedPage({status,mode,onTour,onNavigate}:{status:GuideStatus;mode:string;onTour:()=>void;onNavigate:(id:string)=>void}){
  const checks:[string,string,string][]=[
-  ["Candidate readiness",status.profile,"Review verified facts and unresolved answers in My Profile."],
+  ["Candidate profile",status.profile,"Review owner-entered facts and answers in My Profile. Canonical-resume evidence review is a separate queue."],
   ["Documents",status.documents,"Review job-linked résumé and cover-letter drafts in Resume Manager."],
   ["Google Sheets",status.sheets,"Check connection and last sync in Integrations."],
   ["Production AI","NOT CONFIGURED","AI is optional; paid requests are disabled until durable budgets are ready."],
